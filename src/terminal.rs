@@ -25,11 +25,21 @@ pub struct Cell {
     pub ch: char,
     pub fg: Color,
     pub bg: Color,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
 }
 
 impl Default for Cell {
     fn default() -> Self {
-        Self { ch: ' ', fg: Color::WHITE, bg: Color::BLACK }
+        Self { 
+            ch: ' ', 
+            fg: Color::WHITE, 
+            bg: Color::BLACK,
+            bold: false,
+            italic: false,
+            underline: false,
+        }
     }
 }
 
@@ -59,10 +69,15 @@ pub struct TerminalEmulator {
     pub cursor_y: usize,
     pub current_fg: Color,
     pub current_bg: Color,
+    pub current_bold: bool,
+    pub current_italic: bool,
+    pub current_underline: bool,
+    pub scrolling_region: (usize, usize), // (top, bottom) - 0-indexed, inclusive
     pub cache: Cache,
     pub parser: Parser,
     pub ime_preedit: String,
     pub display_offset: usize, // 스크롤 위치 (0: 최하단)
+    pub pending_responses: Vec<Vec<u8>>, // 터미널이 프로세스에게 보낼 응답 (예: 커서 위치)
 }
 
 impl Default for TerminalEmulator {
@@ -83,10 +98,15 @@ impl TerminalEmulator {
             cursor_x: 0, cursor_y: 0,
             current_fg: Color::WHITE,
             current_bg: Color::BLACK,
+            current_bold: false,
+            current_italic: false,
+            current_underline: false,
+            scrolling_region: (0, rows - 1),
             cache: Cache::default(),
             parser: Parser::new(),
             ime_preedit: String::new(),
             display_offset: 0,
+            pending_responses: Vec::new(),
         }
     }
 
@@ -103,7 +123,7 @@ impl TerminalEmulator {
         self.cache.clear();
     }
 
-    fn scroll_up(&mut self) {
+    fn scroll_up_and_push_history(&mut self) {
         if let Some(line) = self.grid.pop_front() {
             self.history.push_back(line);
             // 무제한 스크롤백을 위해 히스토리 크기 제한을 두지 않거나 매우 크게 설정
@@ -114,8 +134,34 @@ impl TerminalEmulator {
         self.grid.push_back(Line::new(self.cols));
     }
 
+    fn scroll_up_in_region(&mut self, top: usize, bottom: usize) {
+        if top == 0 && bottom == self.rows - 1 {
+            self.scroll_up_and_push_history();
+        } else {
+            // Region scroll-up
+            if top < bottom && bottom < self.rows {
+                let _ = self.grid.remove(top);
+                self.grid.insert(bottom, Line::new(self.cols));
+            }
+        }
+    }
+
+    fn scroll_down_in_region(&mut self, top: usize, bottom: usize) {
+        if top < bottom && bottom < self.rows {
+            let _ = self.grid.remove(bottom);
+            self.grid.insert(top, Line::new(self.cols));
+        }
+    }
+
     fn clear_line(&mut self, row: usize, mode: usize) {
-        let blank = Cell { ch: ' ', fg: self.current_fg, bg: self.current_bg };
+        let blank = Cell { 
+            ch: ' ', 
+            fg: self.current_fg, 
+            bg: self.current_bg,
+            bold: false,
+            italic: false,
+            underline: false,
+        };
         if row < self.grid.len() {
             let line = &mut self.grid[row];
             match mode {
@@ -214,6 +260,7 @@ impl TerminalEmulator {
             self.grid = new_all_lines.into();
         }
 
+        self.scrolling_region = (0, self.rows - 1);
         self.cursor_x = std::cmp::min(self.cursor_x, self.cols - 1);
         self.cursor_y = std::cmp::min(self.cursor_y, self.rows - 1);
         // display_offset이 히스토리 범위를 초과하지 않도록 클램핑
@@ -257,6 +304,55 @@ fn ansi_color(index: u8) -> Color {
     }
 }
 
+fn ansi_color_bright(index: u8) -> Color {
+    match index {
+        0 => Color::from_rgb8(127, 127, 127),
+        1 => Color::from_rgb8(255, 0, 0),
+        2 => Color::from_rgb8(0, 255, 0),
+        3 => Color::from_rgb8(255, 255, 0),
+        4 => Color::from_rgb8(92, 92, 255),
+        5 => Color::from_rgb8(255, 0, 255),
+        6 => Color::from_rgb8(0, 255, 255),
+        7 => Color::WHITE,
+        _ => Color::WHITE,
+    }
+}
+
+fn parse_extended_color(params: &mut vte::ParamsIter<'_>) -> Option<Color> {
+    let type_param = params.next()?.first()?;
+    match type_param {
+        5 => { // 256 colors
+            let index = (*params.next()?.first()?) as u8;
+            Some(color_from_256(index))
+        }
+        2 => { // RGB
+            let r = (*params.next()?.first()?) as u8;
+            let g = (*params.next()?.first()?) as u8;
+            let b = (*params.next()?.first()?) as u8;
+            Some(Color::from_rgb8(r, g, b))
+        }
+        _ => None,
+    }
+}
+
+fn color_from_256(index: u8) -> Color {
+    match index {
+        0..=7 => ansi_color(index),
+        8..=15 => ansi_color_bright(index - 8),
+        16..=231 => {
+            let index = index - 16;
+            let r = (index / 36) * 51;
+            let g = ((index / 6) % 6) * 51;
+            let b = (index % 6) * 51;
+            Color::from_rgb8(r, g, b)
+        }
+        232..=255 => {
+            let gray = (index - 232) * 10 + 8;
+            Color::from_rgb8(gray, gray, gray)
+        }
+    }
+}
+
 // ─── vte::Perform ─────────────────────────────────────────────────────────────
 struct TerminalPerformer<'a> { emulator: &'a mut TerminalEmulator }
 
@@ -267,21 +363,42 @@ impl<'a> Perform for TerminalPerformer<'a> {
         // 1. 래핑 처리: 현재 X 위치가 가득 찼으면 다음 줄로
         if emu.cursor_x >= emu.cols {
             emu.cursor_x = 0;
-            if emu.cursor_y < emu.rows - 1 {
+            let (_, bottom) = emu.scrolling_region;
+            if emu.cursor_y < bottom {
                 emu.cursor_y += 1;
                 emu.grid[emu.cursor_y].is_wrapped = true;
+            } else if emu.cursor_y == bottom {
+                let (top, bottom) = emu.scrolling_region;
+                emu.scroll_up_in_region(top, bottom);
+                emu.grid[bottom].is_wrapped = true;
             } else {
-                emu.scroll_up();
-                emu.grid[emu.rows - 1].is_wrapped = true;
+                // Outside region, just move down if possible
+                if emu.cursor_y < emu.rows - 1 {
+                    emu.cursor_y += 1;
+                }
             }
         }
 
         let w = c.width().unwrap_or(1);
         if emu.cursor_y < emu.rows && emu.cursor_x < emu.cols {
             let line = &mut emu.grid[emu.cursor_y];
-            line.cells[emu.cursor_x] = Cell { ch: c, fg: emu.current_fg, bg: emu.current_bg };
+            line.cells[emu.cursor_x] = Cell { 
+                ch: c, 
+                fg: emu.current_fg, 
+                bg: emu.current_bg,
+                bold: emu.current_bold,
+                italic: emu.current_italic,
+                underline: emu.current_underline,
+            };
             if w > 1 && emu.cursor_x + 1 < emu.cols {
-                line.cells[emu.cursor_x + 1] = Cell { ch: '\0', fg: emu.current_fg, bg: emu.current_bg };
+                line.cells[emu.cursor_x + 1] = Cell { 
+                    ch: '\0', 
+                    fg: emu.current_fg, 
+                    bg: emu.current_bg,
+                    bold: emu.current_bold,
+                    italic: emu.current_italic,
+                    underline: emu.current_underline,
+                };
             }
             emu.cursor_x += w;
         }
@@ -291,11 +408,11 @@ impl<'a> Perform for TerminalPerformer<'a> {
         let emu = &mut self.emulator;
         match byte {
             b'\n' => { 
-                emu.cursor_x = 0;
-                if emu.cursor_y < emu.rows - 1 { 
-                    emu.cursor_y += 1; 
-                } else { 
-                    emu.scroll_up(); 
+                let (top, bottom) = emu.scrolling_region;
+                if emu.cursor_y == bottom {
+                    emu.scroll_up_in_region(top, bottom);
+                } else if emu.cursor_y < emu.rows - 1 {
+                    emu.cursor_y += 1;
                 }
                 emu.grid[emu.cursor_y].is_wrapped = false; // 하드 엔터
             }
@@ -334,17 +451,41 @@ impl<'a> Perform for TerminalPerformer<'a> {
                 emu.cursor_y = std::cmp::min(emu.rows - 1, y.saturating_sub(1));
                 emu.cursor_x = std::cmp::min(emu.cols - 1, x.saturating_sub(1));
             }
-            'm' => { // SGR - Colors
-                for param in params.iter() {
-                    for &p in param {
-                        match p {
-                            0 => { emu.current_fg = Color::WHITE; emu.current_bg = Color::BLACK; }
-                            30..=37 => emu.current_fg = ansi_color((p - 30) as u8),
-                            39 => emu.current_fg = Color::WHITE,
-                            40..=47 => emu.current_bg = ansi_color((p - 40) as u8),
-                            49 => emu.current_bg = Color::BLACK,
-                            _ => {}
+            'm' => { // SGR - Colors and Attributes
+                let mut params_it = params.iter();
+                while let Some(param) = params_it.next() {
+                    let p = param[0];
+                    match p {
+                        0 => { 
+                            emu.current_fg = Color::WHITE; 
+                            emu.current_bg = Color::BLACK; 
+                            emu.current_bold = false;
+                            emu.current_italic = false;
+                            emu.current_underline = false;
                         }
+                        1 => emu.current_bold = true,
+                        3 => emu.current_italic = true,
+                        4 => emu.current_underline = true,
+                        22 => emu.current_bold = false,
+                        23 => emu.current_italic = false,
+                        24 => emu.current_underline = false,
+                        30..=37 => emu.current_fg = ansi_color((p - 30) as u8),
+                        38 => { // Extended FG
+                            if let Some(color) = parse_extended_color(&mut params_it) {
+                                emu.current_fg = color;
+                            }
+                        }
+                        39 => emu.current_fg = Color::WHITE,
+                        40..=47 => emu.current_bg = ansi_color((p - 40) as u8),
+                        48 => { // Extended BG
+                            if let Some(color) = parse_extended_color(&mut params_it) {
+                                emu.current_bg = color;
+                            }
+                        }
+                        49 => emu.current_bg = Color::BLACK,
+                        90..=97 => emu.current_fg = ansi_color_bright((p - 90) as u8),
+                        100..=107 => emu.current_bg = ansi_color_bright((p - 100) as u8),
+                        _ => {}
                     }
                 }
             }
@@ -355,15 +496,64 @@ impl<'a> Perform for TerminalPerformer<'a> {
                 let y = emu.cursor_y;
                 let x = emu.cursor_x;
                 if y < emu.grid.len() {
-                    let mut line = &mut emu.grid[y];
+                    let line = &mut emu.grid[y];
                     for i in x..emu.cols {
                         if i + n < emu.cols {
                             line.cells[i] = line.cells[i + n];
                         } else {
-                            line.cells[i] = Cell { ch: ' ', fg: emu.current_fg, bg: emu.current_bg };
+                            line.cells[i] = Cell { 
+                                ch: ' ', 
+                                fg: emu.current_fg, 
+                                bg: emu.current_bg,
+                                bold: false,
+                                italic: false,
+                                underline: false,
+                            };
                         }
                     }
                 }
+            }
+            'L' => { // IL (Insert Line)
+                let n = std::cmp::max(1, param1);
+                for _ in 0..n {
+                    emu.scroll_down_in_region(emu.cursor_y, emu.scrolling_region.1);
+                }
+            }
+            'M' => { // DL (Delete Line)
+                let n = std::cmp::max(1, param1);
+                for _ in 0..n {
+                    emu.scroll_up_in_region(emu.cursor_y, emu.scrolling_region.1);
+                }
+            }
+            'S' => { // SU (Scroll Up)
+                let n = std::cmp::max(1, param1);
+                for _ in 0..n {
+                    emu.scroll_up_in_region(emu.scrolling_region.0, emu.scrolling_region.1);
+                }
+            }
+            'T' => { // SD (Scroll Down)
+                let n = std::cmp::max(1, param1);
+                for _ in 0..n {
+                    emu.scroll_down_in_region(emu.scrolling_region.0, emu.scrolling_region.1);
+                }
+            }
+            'r' => { // DECSTBM
+                let top = param1.saturating_sub(1);
+                let bottom = it.next().and_then(|p| p.first()).copied().unwrap_or(emu.rows as u16) as usize;
+                let bottom = std::cmp::min(bottom.saturating_sub(1), emu.rows - 1);
+                if top < bottom {
+                    emu.scrolling_region = (top, bottom);
+                }
+            }
+            'n' => { // DSR - Device Status Report
+                if param1 == 6 {
+                    let response = format!("\x1b[{};{}R", emu.cursor_y + 1, emu.cursor_x + 1);
+                    emu.pending_responses.push(response.into_bytes());
+                }
+            }
+            'c' => { // DA - Device Attributes
+                // "I am a VT100 with advanced features"
+                emu.pending_responses.push(b"\x1b[?1;2c".to_vec());
             }
             _ => {}
         }
@@ -376,6 +566,7 @@ impl<Message> Program<Message> for TerminalEmulator {
 
     fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: Cursor) -> Vec<Geometry> {
         let geo = self.cache.draw(renderer, bounds.size(), |frame| {
+            // println!("[Terminal] Drawing frame, bounds: {:?}", bounds);
             frame.fill_rectangle(Point::ORIGIN, bounds.size(), Color::BLACK);
             
             // 그릴 라인 선택 (히스토리 + 현시점 그리드)
@@ -388,14 +579,38 @@ impl<Message> Program<Message> for TerminalEmulator {
 
             for (y, row) in visible_lines.iter().enumerate() {
                 for (x, cell) in row.cells.iter().enumerate() {
+                    let pos = Point::new(x as f32 * CHAR_WIDTH, y as f32 * ROW_HEIGHT);
+                    
+                    // 1. 배경색 렌더링 (검정색이 아닐 때만)
+                    if cell.bg != Color::BLACK {
+                        frame.fill_rectangle(pos, Size::new(CHAR_WIDTH, ROW_HEIGHT), cell.bg);
+                    }
+
+                    // 2. 텍스트 렌더링
                     if cell.ch != ' ' && cell.ch != '\0' {
                         let mut t = Text::default();
                         t.content = cell.ch.to_string();
-                        t.position = Point::new(x as f32 * CHAR_WIDTH, y as f32 * ROW_HEIGHT);
+                        t.position = pos;
                         t.color = cell.fg;
                         t.size = iced::Pixels(ROW_HEIGHT * 0.95);
-                        t.font = D2CODING;
+                        
+                        // Bold 속성 반영
+                        t.font = if cell.bold {
+                            iced::Font { weight: iced::font::Weight::Bold, ..D2CODING }
+                        } else {
+                            D2CODING
+                        };
+                        
                         frame.fill_text(t);
+                    }
+
+                    // 3. 밑줄(Underline) 렌더링
+                    if cell.underline {
+                        frame.fill_rectangle(
+                            Point::new(pos.x, pos.y + ROW_HEIGHT - 2.0),
+                            Size::new(CHAR_WIDTH, 1.0),
+                            cell.fg
+                        );
                     }
                 }
             }

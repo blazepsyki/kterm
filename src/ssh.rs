@@ -47,10 +47,16 @@ impl client::Handler for ClientHandler {
 }
 
 pub enum SshEvent {
-    Connected(mpsc::UnboundedSender<Vec<u8>>),
+    Connected(mpsc::UnboundedSender<SshInput>),
     Data(Vec<u8>),
     Disconnected,
     Error(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum SshInput {
+    Data(Vec<u8>),
+    Resize { cols: u16, rows: u16 },
 }
 
 impl std::fmt::Debug for SshEvent {
@@ -82,7 +88,7 @@ enum SshState {
         session: client::Handle<ClientHandler>,
         channel: russh::Channel<client::Msg>,
         ssh_to_iced_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-        iced_to_ssh_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+        iced_to_ssh_rx: mpsc::UnboundedReceiver<SshInput>,
     },
     Finished,
 }
@@ -129,7 +135,7 @@ pub fn connect_and_subscribe(
                     return Some((SshEvent::Error(e.to_string()), SshState::Finished));
                 }
 
-                let (iced_to_ssh_tx, iced_to_ssh_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+                let (iced_to_ssh_tx, iced_to_ssh_rx) = mpsc::unbounded_channel::<SshInput>();
                 Some((SshEvent::Connected(iced_to_ssh_tx), SshState::Connected {
                     session,
                     channel,
@@ -147,9 +153,16 @@ pub fn connect_and_subscribe(
                     }
                     res = iced_to_ssh_rx.recv() => {
                         match res {
-                            Some(input) => {
+                            Some(SshInput::Data(input)) => {
                                 if let Err(e) = channel.data(&input[..]).await {
                                     Some((SshEvent::Error(format!("Send Error: {}", e)), SshState::Finished))
+                                } else {
+                                    Some((SshEvent::Data(vec![]), SshState::Connected { session, channel, ssh_to_iced_rx, iced_to_ssh_rx }))
+                                }
+                            }
+                            Some(SshInput::Resize { cols, rows }) => {
+                                if let Err(e) = channel.window_change(cols as u32, rows as u32, 0, 0).await {
+                                    Some((SshEvent::Error(format!("Resize Error: {}", e)), SshState::Finished))
                                 } else {
                                     Some((SshEvent::Data(vec![]), SshState::Connected { session, channel, ssh_to_iced_rx, iced_to_ssh_rx }))
                                 }
