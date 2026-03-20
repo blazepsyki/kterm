@@ -27,6 +27,23 @@ impl client::Handler for ClientHandler {
         let _ = self.sender.send(data.to_vec());
         Ok(())
     }
+
+    async fn channel_eof(
+        &mut self,
+        _channel: russh::ChannelId,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn channel_close(
+        &mut self,
+        _channel: russh::ChannelId,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let _ = self.sender.send(b"\r\nConnection closed by foreign host.\r\n".to_vec());
+        Ok(())
+    }
 }
 
 pub enum SshEvent {
@@ -104,7 +121,6 @@ pub fn connect_and_subscribe(
                     Err(e) => return Some((SshEvent::Error(e.to_string()), SshState::Finished)),
                 };
 
-                // PTY 요청 (인터랙티브 쉘을 위해 필수)
                 if let Err(e) = channel.request_pty(true, "xterm-256color", 80, 24, 0, 0, &[]).await {
                     return Some((SshEvent::Error(e.to_string()), SshState::Finished));
                 }
@@ -121,23 +137,25 @@ pub fn connect_and_subscribe(
                     iced_to_ssh_rx,
                 }))
             }
-            SshState::Connected { session, mut channel, mut ssh_to_iced_rx, mut iced_to_ssh_rx } => {
+            SshState::Connected { session, channel, mut ssh_to_iced_rx, mut iced_to_ssh_rx } => {
                 tokio::select! {
-                    Some(data) = ssh_to_iced_rx.recv() => {
-                        Some((SshEvent::Data(data), SshState::Connected { session, channel, ssh_to_iced_rx, iced_to_ssh_rx }))
-                    }
-                    Some(input) = iced_to_ssh_rx.recv() => {
-                        if let Err(e) = channel.data(&input[..]).await {
-                            Some((SshEvent::Error(e.to_string()), SshState::Finished))
-                        } else {
-                            // No event to return, but we need to continue unfold.
-                            // We can use a recursive call or a dummy event.
-                            // I'll return an empty Data event which main.rs will ignore or process as empty.
-                            Some((SshEvent::Data(vec![]), SshState::Connected { session, channel, ssh_to_iced_rx, iced_to_ssh_rx }))
+                    res = ssh_to_iced_rx.recv() => {
+                        match res {
+                            Some(data) => Some((SshEvent::Data(data), SshState::Connected { session, channel, ssh_to_iced_rx, iced_to_ssh_rx })),
+                            None => Some((SshEvent::Disconnected, SshState::Finished)),
                         }
                     }
-                    _res = channel.wait() => {
-                         Some((SshEvent::Data(vec![]), SshState::Connected { session, channel, ssh_to_iced_rx, iced_to_ssh_rx }))
+                    res = iced_to_ssh_rx.recv() => {
+                        match res {
+                            Some(input) => {
+                                if let Err(e) = channel.data(&input[..]).await {
+                                    Some((SshEvent::Error(format!("Send Error: {}", e)), SshState::Finished))
+                                } else {
+                                    Some((SshEvent::Data(vec![]), SshState::Connected { session, channel, ssh_to_iced_rx, iced_to_ssh_rx }))
+                                }
+                            }
+                            None => Some((SshEvent::Disconnected, SshState::Finished)),
+                        }
                     }
                 }
             }

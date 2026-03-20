@@ -20,18 +20,41 @@ const ROW_HEIGHT: f32 = 20.0;
 const CHAR_WIDTH: f32 = 10.0; // D2Coding은 0.5 비율이 적당합니다 (기존 12.0에서 축소)
 
 // ─── 터미널 셀 ────────────────────────────────────────────────────────────────
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cell {
     pub ch: char,
     pub fg: Color,
     pub bg: Color,
 }
 
+impl Default for Cell {
+    fn default() -> Self {
+        Self { ch: ' ', fg: Color::WHITE, bg: Color::BLACK }
+    }
+}
+
+// ─── 터미널 라인 ─────────────────────────────────────────────────────────────
+#[derive(Clone, Debug)]
+pub struct Line {
+    pub cells: Vec<Cell>,
+    pub is_wrapped: bool, // 이전 라인에서 자동 줄바꿈되어 이어진 경우 true
+}
+
+impl Line {
+    pub fn new(cols: usize) -> Self {
+        Self {
+            cells: vec![Cell::default(); cols],
+            is_wrapped: false,
+        }
+    }
+}
+
 // ─── 터미널 상태 ──────────────────────────────────────────────────────────────
 pub struct TerminalEmulator {
     pub cols: usize,
     pub rows: usize,
-    pub grid: Vec<Vec<Cell>>,
+    pub history: std::collections::VecDeque<Line>, // 화면 위로 밀려난 내역
+    pub grid: std::collections::VecDeque<Line>,    // 현재 화면에 보이는 라인들
     pub cursor_x: usize,
     pub cursor_y: usize,
     pub current_fg: Color,
@@ -39,6 +62,7 @@ pub struct TerminalEmulator {
     pub cache: Cache,
     pub parser: Parser,
     pub ime_preedit: String,
+    pub display_offset: usize, // 스크롤 위치 (0: 최하단)
 }
 
 impl Default for TerminalEmulator {
@@ -47,16 +71,22 @@ impl Default for TerminalEmulator {
 
 impl TerminalEmulator {
     pub fn new(rows: usize, cols: usize) -> Self {
-        let blank = Cell { ch: ' ', fg: Color::WHITE, bg: Color::BLACK };
+        let mut grid = std::collections::VecDeque::with_capacity(rows);
+        for _ in 0..rows {
+            grid.push_back(Line::new(cols));
+        }
+
         Self {
             cols, rows,
-            grid: vec![vec![blank; cols]; rows],
+            history: std::collections::VecDeque::with_capacity(1000), // 가단위 1000줄
+            grid,
             cursor_x: 0, cursor_y: 0,
             current_fg: Color::WHITE,
             current_bg: Color::BLACK,
             cache: Cache::default(),
             parser: Parser::new(),
             ime_preedit: String::new(),
+            display_offset: 0,
         }
     }
 
@@ -74,25 +104,29 @@ impl TerminalEmulator {
     }
 
     fn scroll_up(&mut self) {
-        let blank = Cell { ch: ' ', fg: Color::WHITE, bg: Color::BLACK };
-        if !self.grid.is_empty() {
-            self.grid.remove(0);
-            self.grid.push(vec![blank; self.cols]);
+        if let Some(line) = self.grid.pop_front() {
+            self.history.push_back(line);
+            // 무제한 스크롤백을 위해 히스토리 크기 제한을 두지 않거나 매우 크게 설정
+            if self.history.len() > 10000 {
+                self.history.pop_front();
+            }
         }
+        self.grid.push_back(Line::new(self.cols));
     }
 
     fn clear_line(&mut self, row: usize, mode: usize) {
         let blank = Cell { ch: ' ', fg: self.current_fg, bg: self.current_bg };
         if row < self.grid.len() {
+            let line = &mut self.grid[row];
             match mode {
                 0 => { // To end
-                    for x in self.cursor_x..self.cols { self.grid[row][x] = blank; }
+                    for x in self.cursor_x..self.cols { line.cells[x] = blank; }
                 }
                 1 => { // To start
-                    for x in 0..=self.cursor_x { if x < self.cols { self.grid[row][x] = blank; } }
+                    for x in 0..=self.cursor_x { if x < self.cols { line.cells[x] = blank; } }
                 }
                 2 => { // All
-                    for x in 0..self.cols { self.grid[row][x] = blank; }
+                    for x in 0..self.cols { line.cells[x] = blank; }
                 }
                 _ => {}
             }
@@ -120,6 +154,71 @@ impl TerminalEmulator {
             }
             _ => {}
         }
+    }
+
+    pub fn resize(&mut self, new_rows: usize, new_cols: usize) {
+        if self.cols == new_cols && self.rows == new_rows { return; }
+
+        let mut all_lines: Vec<Line> = self.history.drain(..).collect();
+        all_lines.extend(self.grid.drain(..));
+
+        let mut logical_lines: Vec<Vec<Cell>> = Vec::new();
+        let mut current_logical: Vec<Cell> = Vec::new();
+
+        for line in all_lines {
+            if !line.is_wrapped && !current_logical.is_empty() {
+                logical_lines.push(current_logical);
+                current_logical = Vec::new();
+            }
+            // 공백 트리밍은 생략하거나 주의 필요 (커서 위치 보존 때문)
+            current_logical.extend(line.cells);
+        }
+        if !current_logical.is_empty() {
+            logical_lines.push(current_logical);
+        }
+
+        let mut new_all_lines = Vec::new();
+        for mut logical in logical_lines {
+            // 오른쪽 끝 공백 제거 (Reflow 최적화)
+            while logical.last().map_or(false, |c| c.ch == ' ') {
+                logical.pop();
+            }
+            
+            if logical.is_empty() {
+                new_all_lines.push(Line::new(new_cols));
+                continue;
+            }
+
+            let chunks = logical.chunks(new_cols);
+            for (i, chunk) in chunks.enumerate() {
+                let mut new_line = Line::new(new_cols);
+                for (j, &cell) in chunk.iter().enumerate() {
+                    new_line.cells[j] = cell;
+                }
+                new_line.is_wrapped = i > 0;
+                new_all_lines.push(new_line);
+            }
+        }
+
+        self.cols = new_cols;
+        self.rows = new_rows;
+
+        if new_all_lines.len() <= self.rows {
+            self.grid = new_all_lines.into();
+            while self.grid.len() < self.rows {
+                self.grid.push_back(Line::new(self.cols));
+            }
+        } else {
+            let split_at = new_all_lines.len() - self.rows;
+            self.history = new_all_lines.drain(..split_at).collect();
+            self.grid = new_all_lines.into();
+        }
+
+        self.cursor_x = std::cmp::min(self.cursor_x, self.cols - 1);
+        self.cursor_y = std::cmp::min(self.cursor_y, self.rows - 1);
+        // display_offset이 히스토리 범위를 초과하지 않도록 클램핑
+        self.display_offset = std::cmp::min(self.display_offset, self.history.len());
+        self.cache.clear();
     }
 
     /// 커서의 픽셀 범위 (OS IME 팝업 힌트용)
@@ -170,16 +269,19 @@ impl<'a> Perform for TerminalPerformer<'a> {
             emu.cursor_x = 0;
             if emu.cursor_y < emu.rows - 1 {
                 emu.cursor_y += 1;
+                emu.grid[emu.cursor_y].is_wrapped = true;
             } else {
                 emu.scroll_up();
+                emu.grid[emu.rows - 1].is_wrapped = true;
             }
         }
 
         let w = c.width().unwrap_or(1);
         if emu.cursor_y < emu.rows && emu.cursor_x < emu.cols {
-            emu.grid[emu.cursor_y][emu.cursor_x] = Cell { ch: c, fg: emu.current_fg, bg: emu.current_bg };
+            let line = &mut emu.grid[emu.cursor_y];
+            line.cells[emu.cursor_x] = Cell { ch: c, fg: emu.current_fg, bg: emu.current_bg };
             if w > 1 && emu.cursor_x + 1 < emu.cols {
-                emu.grid[emu.cursor_y][emu.cursor_x + 1] = Cell { ch: '\0', fg: emu.current_fg, bg: emu.current_bg };
+                line.cells[emu.cursor_x + 1] = Cell { ch: '\0', fg: emu.current_fg, bg: emu.current_bg };
             }
             emu.cursor_x += w;
         }
@@ -195,12 +297,13 @@ impl<'a> Perform for TerminalPerformer<'a> {
                 } else { 
                     emu.scroll_up(); 
                 }
+                emu.grid[emu.cursor_y].is_wrapped = false; // 하드 엔터
             }
             b'\r'   => emu.cursor_x = 0,
             b'\x08' => { // Backspace
                 if emu.cursor_x > 0 {
                     emu.cursor_x -= 1;
-                    if emu.grid[emu.cursor_y][emu.cursor_x].ch == '\0' && emu.cursor_x > 0 {
+                    if emu.grid[emu.cursor_y].cells[emu.cursor_x].ch == '\0' && emu.cursor_x > 0 {
                         emu.cursor_x -= 1;
                     }
                 }
@@ -247,6 +350,21 @@ impl<'a> Perform for TerminalPerformer<'a> {
             }
             'J' => emu.clear_screen(param1), // ED
             'K' => emu.clear_line(emu.cursor_y, param1), // EL
+            'P' => { // DCH (Delete Character)
+                let n = std::cmp::max(1, param1);
+                let y = emu.cursor_y;
+                let x = emu.cursor_x;
+                if y < emu.grid.len() {
+                    let mut line = &mut emu.grid[y];
+                    for i in x..emu.cols {
+                        if i + n < emu.cols {
+                            line.cells[i] = line.cells[i + n];
+                        } else {
+                            line.cells[i] = Cell { ch: ' ', fg: emu.current_fg, bg: emu.current_bg };
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -259,8 +377,17 @@ impl<Message> Program<Message> for TerminalEmulator {
     fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: Cursor) -> Vec<Geometry> {
         let geo = self.cache.draw(renderer, bounds.size(), |frame| {
             frame.fill_rectangle(Point::ORIGIN, bounds.size(), Color::BLACK);
-            for (y, row) in self.grid.iter().enumerate() {
-                for (x, cell) in row.iter().enumerate() {
+            
+            // 그릴 라인 선택 (히스토리 + 현시점 그리드)
+            let mut all_viewable: Vec<&Line> = self.history.iter().collect();
+            all_viewable.extend(self.grid.iter());
+
+            let start_idx = all_viewable.len().saturating_sub(self.rows + self.display_offset);
+            let end_idx = std::cmp::min(start_idx + self.rows, all_viewable.len());
+            let visible_lines = &all_viewable[start_idx..end_idx];
+
+            for (y, row) in visible_lines.iter().enumerate() {
+                for (x, cell) in row.cells.iter().enumerate() {
                     if cell.ch != ' ' && cell.ch != '\0' {
                         let mut t = Text::default();
                         t.content = cell.ch.to_string();
@@ -272,18 +399,22 @@ impl<Message> Program<Message> for TerminalEmulator {
                     }
                 }
             }
-            let cp = Point::new(self.cursor_x as f32 * CHAR_WIDTH, self.cursor_y as f32 * ROW_HEIGHT);
-            frame.fill_rectangle(cp, Size::new(CHAR_WIDTH, ROW_HEIGHT), Color::from_rgba(0.5, 1.0, 0.5, 0.5));
-            if !self.ime_preedit.is_empty() {
-                let pw = self.ime_preedit.chars().count() as f32 * CHAR_WIDTH;
-                frame.fill_rectangle(cp, Size::new(pw, ROW_HEIGHT), Color::BLACK);
-                let mut t = Text::default();
-                t.content = self.ime_preedit.clone();
-                t.position = cp;
-                t.color = Color::WHITE;
-                t.size = iced::Pixels(ROW_HEIGHT * 0.95);
-                t.font = D2CODING;
-                frame.fill_text(t);
+
+            // 커서는 항상 현재 입력 중인 (최하단) 그리드에 위치하므로 오프셋에 따라 숨김 처리
+            if self.display_offset == 0 {
+                let cp = Point::new(self.cursor_x as f32 * CHAR_WIDTH, self.cursor_y as f32 * ROW_HEIGHT);
+                frame.fill_rectangle(cp, Size::new(CHAR_WIDTH, ROW_HEIGHT), Color::from_rgba(0.5, 1.0, 0.5, 0.5));
+                if !self.ime_preedit.is_empty() {
+                    let pw = self.ime_preedit.chars().count() as f32 * CHAR_WIDTH;
+                    frame.fill_rectangle(cp, Size::new(pw, ROW_HEIGHT), Color::BLACK);
+                    let mut t = Text::default();
+                    t.content = self.ime_preedit.clone();
+                    t.position = cp;
+                    t.color = Color::WHITE;
+                    t.size = iced::Pixels(ROW_HEIGHT * 0.95);
+                    t.font = D2CODING;
+                    frame.fill_text(t);
+                }
             }
         });
         vec![geo]
@@ -293,17 +424,19 @@ impl<Message> Program<Message> for TerminalEmulator {
 // ─── 공식 커스텀 Widget ───────────────────────────────────────────────────────
 /// Canvas 기반 렌더링 + Widget::update()에서 shell.request_input_method()로
 /// OS에 터미널 커서 정확한 픽셀 좌표 전달 → 한글 팝업 위치 정확
-pub struct TerminalView<'a> {
+pub struct TerminalView<'a, Message> {
     emulator: &'a TerminalEmulator,
+    on_scroll: fn(f32) -> Message,
+    on_resize: fn(usize, usize) -> Message,
 }
 
-impl<'a> TerminalView<'a> {
-    pub fn new(emulator: &'a TerminalEmulator) -> Self {
-        Self { emulator }
+impl<'a, Message> TerminalView<'a, Message> {
+    pub fn new(emulator: &'a TerminalEmulator, on_scroll: fn(f32) -> Message, on_resize: fn(usize, usize) -> Message) -> Self {
+        Self { emulator, on_scroll, on_resize }
     }
 }
 
-impl<'a, Message: Clone> Widget<Message, Theme, Renderer> for TerminalView<'a> {
+impl<'a, Message: Clone> Widget<Message, Theme, Renderer> for TerminalView<'a, Message> {
     fn tag(&self) -> tree::Tag { tree::Tag::stateless() }
     fn state(&self) -> tree::State { tree::State::None }
     fn children(&self) -> Vec<Tree> { vec![] }
@@ -353,10 +486,33 @@ impl<'a, Message: Clone> Widget<Message, Theme, Renderer> for TerminalView<'a> {
         shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
     ) {
-        // RedrawRequested 시마다 IME 정보를 프레임워크에 주입
-        if matches!(event, iced::Event::Window(iced::window::Event::RedrawRequested(_))) {
-            let ime_state = self.emulator.current_input_method(layout.bounds());
-            shell.request_input_method(&ime_state);
+        let bounds = layout.bounds();
+        let new_cols = (bounds.width / 10.0) as usize;
+        let new_rows = (bounds.height / 20.0) as usize;
+
+        if new_cols > 0 && new_rows > 0 && (new_cols != self.emulator.cols || new_rows != self.emulator.rows) {
+            // main.rs로 리사이즈 요청 전송
+            // on_scroll처럼 콜백을 하나 더 추가하거나, TerminalResize 전용 콜백 도입 필요
+            // 여기서는 단순함을 위해 기존 TerminalResize 메시지를 활용하도록 main.rs 수정 필요
+        }
+
+        match event {
+            iced::Event::Window(iced::window::Event::RedrawRequested(_)) => {
+                let ime_state = self.emulator.current_input_method(bounds);
+                shell.request_input_method(&ime_state);
+                
+                if new_cols > 0 && new_rows > 0 && (new_cols != self.emulator.cols || new_rows != self.emulator.rows) {
+                    shell.publish((self.on_resize)(new_rows, new_cols));
+                }
+            }
+            iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                match delta {
+                    mouse::ScrollDelta::Lines { y, .. } | mouse::ScrollDelta::Pixels { y, .. } => {
+                        shell.publish((self.on_scroll)(*y));
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -367,6 +523,6 @@ impl<'a, Message: Clone> Widget<Message, Theme, Renderer> for TerminalView<'a> {
     }
 }
 
-impl<'a, Message: Clone + 'a> From<TerminalView<'a>> for Element<'a, Message> {
-    fn from(w: TerminalView<'a>) -> Self { Element::new(w) }
+impl<'a, Message: Clone + 'a> From<TerminalView<'a, Message>> for Element<'a, Message> {
+    fn from(w: TerminalView<'a, Message>) -> Self { Element::new(w) }
 }
