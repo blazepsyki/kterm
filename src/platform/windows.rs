@@ -2,7 +2,7 @@ use tokio::sync::mpsc;
 use iced::futures::StreamExt;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize, MasterPty, Child};
 use std::io::Write;
-use crate::ssh::{SshEvent, SshInput};
+use crate::connection::{ConnectionEvent, ConnectionInput};
 
 /// 로컬 셸의 상태를 관리하기 위한 구조체
 struct LocalShellState {
@@ -11,9 +11,9 @@ struct LocalShellState {
     _child: Box<dyn Child + Send + Sync>, // 프로세스가 종료되지 않도록 보관
 }
 
-pub fn spawn_local_shell() -> iced::futures::stream::BoxStream<'static, SshEvent> {
+pub fn spawn_local_shell() -> iced::futures::stream::BoxStream<'static, ConnectionEvent> {
     let (ssh_to_iced_tx, ssh_to_iced_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let (iced_to_ssh_tx, iced_to_ssh_rx) = mpsc::unbounded_channel::<SshInput>();
+    let (iced_to_ssh_tx, iced_to_ssh_rx) = mpsc::unbounded_channel::<ConnectionInput>();
 
     // unfold의 초기 상태 정의
     let initial_state = (None, ssh_to_iced_tx, iced_to_ssh_tx, ssh_to_iced_rx, iced_to_ssh_rx);
@@ -30,13 +30,13 @@ pub fn spawn_local_shell() -> iced::futures::stream::BoxStream<'static, SshEvent
                     pixel_height: 0,
                 }) {
                     Ok(p) => p,
-                    Err(e) => return Some((SshEvent::Error(format!("PTY Open Error: {}", e)), (None, ssh_tx, iced_tx, ssh_rx, iced_rx))),
+                    Err(e) => return Some((ConnectionEvent::Error(format!("PTY Open Error: {}", e)), (None, ssh_tx, iced_tx, ssh_rx, iced_rx))),
                 };
 
                 let cmd = CommandBuilder::new("powershell.exe");
                 let child = match pair.slave.spawn_command(cmd) {
                     Ok(c) => c,
-                    Err(e) => return Some((SshEvent::Error(format!("Process Spawn Error: {}", e)), (None, ssh_tx, iced_tx, ssh_rx, iced_rx))),
+                    Err(e) => return Some((ConnectionEvent::Error(format!("Process Spawn Error: {}", e)), (None, ssh_tx, iced_tx, ssh_rx, iced_rx))),
                 };
 
                 // PTY -> Iced 출력 루프 (별도 스레드에서 블로킹 읽기 수행)
@@ -60,7 +60,7 @@ pub fn spawn_local_shell() -> iced::futures::stream::BoxStream<'static, SshEvent
                     _child: child,
                 });
                 
-                return Some((SshEvent::Connected(iced_tx.clone()), (shell_state, ssh_tx, iced_tx, ssh_rx, iced_rx)));
+                return Some((ConnectionEvent::Connected(iced_tx.clone()), (shell_state, ssh_tx, iced_tx, ssh_rx, iced_rx)));
             }
 
             let mut current = shell_state.take().unwrap();
@@ -72,23 +72,23 @@ pub fn spawn_local_shell() -> iced::futures::stream::BoxStream<'static, SshEvent
                         Some(data) => {
                             // println!("[LocalShell] PTY Data: {:?}", String::from_utf8_lossy(&data));
                             let next_state = (Some(current), ssh_tx, iced_tx, ssh_rx, iced_rx);
-                            Some((SshEvent::Data(data), next_state))
+                            Some((ConnectionEvent::Data(data), next_state))
                         }
                         None => {
-                            Some((SshEvent::Disconnected, (None, ssh_tx, iced_tx, ssh_rx, iced_rx)))
+                            Some((ConnectionEvent::Disconnected, (None, ssh_tx, iced_tx, ssh_rx, iced_rx)))
                         }
                     }
                 }
                 // Iced 입력 수신
                 res = iced_rx.recv() => {
                     match res {
-                        Some(SshInput::Data(data)) => {
+                        Some(ConnectionInput::Data(data)) => {
                             let _ = current.writer.write_all(&data);
                             let _ = current.writer.flush();
                             let next_state = (Some(current), ssh_tx, iced_tx, ssh_rx, iced_rx);
-                            Some((SshEvent::Data(vec![]), next_state))
+                            Some((ConnectionEvent::Data(vec![]), next_state))
                         }
-                        Some(SshInput::Resize { cols, rows }) => {
+                        Some(ConnectionInput::Resize { cols, rows }) => {
                             let _ = current.master.resize(PtySize {
                                 rows,
                                 cols,
@@ -96,7 +96,7 @@ pub fn spawn_local_shell() -> iced::futures::stream::BoxStream<'static, SshEvent
                                 pixel_height: 0,
                             });
                             let next_state = (Some(current), ssh_tx, iced_tx, ssh_rx, iced_rx);
-                            Some((SshEvent::Data(vec![]), next_state))
+                            Some((ConnectionEvent::Data(vec![]), next_state))
                         }
                         None => None,
                     }
@@ -105,3 +105,4 @@ pub fn spawn_local_shell() -> iced::futures::stream::BoxStream<'static, SshEvent
         }
     ).boxed()
 }
+

@@ -3,9 +3,9 @@ use iced::{Background, Color, Element, Length, Task, Subscription, event, keyboa
 use iced::widget::operation::focus;
 use iced::window;
 mod terminal;
-mod ssh;
+mod connection;
 mod platform;
-use terminal::{TerminalEmulator, TerminalView};
+use terminal::{TerminalEmulator, TerminalView, Selection};
 use tokio::sync::mpsc;
 
 pub const D2CODING: iced::Font = iced::Font {
@@ -46,7 +46,7 @@ struct Session {
     name: String,
     kind: SessionKind,
     terminal: TerminalEmulator,
-    sender: Option<mpsc::UnboundedSender<ssh::SshInput>>,
+    sender: Option<mpsc::UnboundedSender<connection::ConnectionInput>>,
 }
 
 impl Session {
@@ -120,7 +120,7 @@ pub enum Message {
     ImePreedit(String),
     ImeCommit(String),
     FontLoaded(Result<(), iced::font::Error>),
-    SshMessage(usize, ssh::SshEvent),
+    ConnectionMessage(usize, connection::ConnectionEvent),
     TerminalResize(usize, usize),
     TerminalScroll(f32),
     TerminalScrollTo(usize),
@@ -129,6 +129,7 @@ pub enum Message {
     UserChanged(String),
     PassChanged(String),
     ConnectSsh,
+    ConnectTelnet,
     ConnectLocal,
     TabPressed(bool),
     FieldFocused(usize),
@@ -140,6 +141,14 @@ pub enum Message {
     MaximizeWindow,
     CloseWindow,
     ToggleMenu(&'static str),
+    SelectionStart(usize, usize),
+    SelectionUpdate(usize, usize),
+    CopyText(String),
+    CopyCurrentSelection,
+    PasteFromClipboard,
+    PasteData(Option<String>),
+    ClearSelection,
+    TryHandleKey(keyboard::Key, keyboard::Modifiers),
 }
 
 // ---------- Update ----------
@@ -163,7 +172,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::TerminalInput(bytes) => {
             if let Some(session) = state.sessions.get_mut(state.active_index) {
-                if let Some(ref sender) = session.sender { let _ = sender.send(ssh::SshInput::Data(bytes)); }
+                if let Some(ref sender) = session.sender { let _ = sender.send(connection::ConnectionInput::Data(bytes)); }
                 else { session.terminal.process_bytes(&bytes); }
             }
             Task::none()
@@ -178,31 +187,32 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::ImeCommit(text_str) => {
             let bytes = text_str.into_bytes();
             if let Some(session) = state.sessions.get_mut(state.active_index) {
-                if let Some(ref sender) = session.sender { let _ = sender.send(ssh::SshInput::Data(bytes)); }
+                if let Some(ref sender) = session.sender { let _ = sender.send(connection::ConnectionInput::Data(bytes)); }
                 else { session.terminal.process_bytes(&bytes); }
                 session.terminal.clear_preedit();
             }
             Task::none()
         }
         Message::FontLoaded(_) => Task::none(),
-        Message::SshMessage(target_index, event) => {
+        Message::ConnectionMessage(target_index, event) => {
             if let Some(session) = state.sessions.get_mut(target_index) {
                 match event {
-                    ssh::SshEvent::Connected(sender) => {
+                    connection::ConnectionEvent::Connected(sender) => {
                         session.sender = Some(sender.clone());
-                        let _ = sender.send(ssh::SshInput::Resize { cols: session.terminal.cols as u16, rows: session.terminal.rows as u16 });
+                        let _ = sender.send(connection::ConnectionInput::Resize { cols: session.terminal.cols as u16, rows: session.terminal.rows as u16 });
                     }
-                    ssh::SshEvent::Data(data) => {
+                    connection::ConnectionEvent::Data(data) => {
                         if !data.is_empty() {
                             session.terminal.process_bytes(&data);
+                            session.terminal.cache.clear(); // [ADD] 수신된 데이터로 그리드가 수정되었으므로 렌더링 캐시 무효화
                             let responses: Vec<Vec<u8>> = session.terminal.pending_responses.drain(..).collect();
                             for resp in responses {
-                                if let Some(ref sender) = session.sender { let _ = sender.send(ssh::SshInput::Data(resp)); }
+                                if let Some(ref sender) = session.sender { let _ = sender.send(connection::ConnectionInput::Data(resp)); }
                             }
                         }
                     }
-                    ssh::SshEvent::Disconnected => { session.sender = None; }
-                    ssh::SshEvent::Error(_e) => { session.sender = None; }
+                    connection::ConnectionEvent::Disconnected => { session.sender = None; }
+                    connection::ConnectionEvent::Error(_e) => { session.sender = None; }
                 }
             }
             Task::none()
@@ -211,7 +221,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             if let Some(session) = state.sessions.get_mut(state.active_index) {
                 if session.terminal.rows != new_rows || session.terminal.cols != new_cols {
                     session.terminal.resize(new_rows, new_cols);
-                    if let Some(ref sender) = session.sender { let _ = sender.send(ssh::SshInput::Resize { cols: new_cols as u16, rows: new_rows as u16 }); }
+                    if let Some(ref sender) = session.sender { let _ = sender.send(connection::ConnectionInput::Resize { cols: new_cols as u16, rows: new_rows as u16 }); }
                 }
             }
             Task::none()
@@ -246,7 +256,17 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             if let Some(session) = state.sessions.get_mut(target_index) {
                 *session = Session::new_terminal(name, session.terminal.rows, session.terminal.cols);
             }
-            Task::run(ssh::connect_and_subscribe(host, port, user, pass), move |event| Message::SshMessage(target_index, event))
+            Task::run(connection::ssh::connect_and_subscribe(host, port, user, pass), move |event| Message::ConnectionMessage(target_index, event))
+        }
+        Message::ConnectTelnet => {
+            let host = state.ssh_host.clone();
+            let port: u16 = state.ssh_port.parse().unwrap_or(23); // Telnet default
+            let name = format!("Telnet: {}:{}", host, port);
+            let target_index = state.active_index;
+            if let Some(session) = state.sessions.get_mut(target_index) {
+                *session = Session::new_terminal(name, session.terminal.rows, session.terminal.cols);
+            }
+            Task::run(connection::telnet::connect_and_subscribe(host, port), move |event| Message::ConnectionMessage(target_index, event))
         }
         Message::ConnectLocal => {
             let name = "Local: PowerShell".to_string();
@@ -254,7 +274,89 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             if let Some(session) = state.sessions.get_mut(target_index) {
                 *session = Session::new_terminal(name, session.terminal.rows, session.terminal.cols);
             }
-            Task::run(platform::windows::spawn_local_shell(), move |event| Message::SshMessage(target_index, event))
+            Task::run(platform::windows::spawn_local_shell(), move |event| Message::ConnectionMessage(target_index, event))
+        }
+
+        Message::SelectionStart(col, row) => {
+            if let Some(session) = state.sessions.get_mut(state.active_index) {
+                session.terminal.selection = Some(Selection { start: (col, row), end: (col, row) });
+                session.terminal.cache.clear();
+            }
+            Task::none()
+        }
+        Message::SelectionUpdate(col, row) => {
+            if let Some(session) = state.sessions.get_mut(state.active_index) {
+                if let Some(ref mut sel) = session.terminal.selection {
+                    sel.end = (col, row);
+                    session.terminal.cache.clear();
+                }
+            }
+            Task::none()
+        }
+        Message::CopyCurrentSelection => {
+            if let Some(session) = state.sessions.get(state.active_index) {
+                let text = session.terminal.get_selected_text();
+                return Task::done(Message::CopyText(text));
+            }
+            Task::none()
+        }
+        Message::CopyText(text) => {
+            if !text.is_empty() {
+                return iced::clipboard::write(text);
+            }
+            Task::none()
+        }
+        Message::PasteFromClipboard => {
+            iced::clipboard::read().map(Message::PasteData)
+        }
+        Message::PasteData(text_opt) => {
+            if let Some(text) = text_opt {
+                if let Some(session) = state.sessions.get_mut(state.active_index) {
+                    let filtered_text: String = text.chars().filter(|&c| c != '\0').collect();
+                    let bytes = filtered_text.into_bytes();
+                    if let Some(ref sender) = session.sender { let _ = sender.send(connection::ConnectionInput::Data(bytes)); }
+                    else { session.terminal.process_bytes(&bytes); }
+                }
+            }
+            Task::none()
+        }
+        Message::ClearSelection => {
+            if let Some(session) = state.sessions.get_mut(state.active_index) {
+                session.terminal.selection = None;
+                session.terminal.cache.clear();
+            }
+            Task::none()
+        }
+        Message::TryHandleKey(key, modifiers) => {
+            if let Some(session) = state.sessions.get_mut(state.active_index) {
+                let has_sel = session.terminal.has_selection();
+                let ctrl = modifiers.control();
+
+                // Ctrl+C
+                if ctrl && matches!(key, keyboard::Key::Character(ref c) if c == "c" || c == "C") {
+                    if has_sel {
+                        let text = session.terminal.get_selected_text();
+                        return Task::done(Message::CopyText(text));
+                    } else {
+                        return Task::done(Message::TerminalInput(vec![3]));
+                    }
+                }
+
+                // Ctrl+V
+                if ctrl && matches!(key, keyboard::Key::Character(ref c) if c == "v" || c == "V") {
+                    return Task::done(Message::PasteFromClipboard);
+                }
+
+                // ESC
+                if matches!(key, keyboard::Key::Named(keyboard::key::Named::Escape)) {
+                    if has_sel {
+                        return Task::done(Message::ClearSelection);
+                    } else {
+                        return Task::done(Message::TerminalInput(vec![27]));
+                    }
+                }
+            }
+            Task::none()
         }
         Message::TabPressed(shift) => {
             if shift { state.focused_field = if state.focused_field == 0 { 3 } else { state.focused_field - 1 }; }
@@ -313,7 +415,17 @@ fn subscription(state: &State) -> Subscription<Message> {
                         _ => None,
                     }
                 }
-                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, text: key_text, location, .. }) => {
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, text: key_text, location, modifiers, .. }) => {
+                    let ctrl = modifiers.control();
+                    
+                    // Priority shortcuts
+                    if ctrl && matches!(key, keyboard::Key::Character(ref c) if c == "c" || c == "C" || c == "v" || c == "V") {
+                        return Some(Message::TryHandleKey(key.clone(), modifiers));
+                    }
+                    if matches!(key, keyboard::Key::Named(keyboard::key::Named::Escape)) {
+                        return Some(Message::TryHandleKey(key.clone(), modifiers));
+                    }
+
                     let mut bytes = Vec::new();
                     let is_numpad = matches!(location, keyboard::Location::Numpad);
                     let numpad_text = if is_numpad { key_text.as_deref().filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit() || ".-+*/".contains(c))) } else { None };
@@ -321,7 +433,7 @@ fn subscription(state: &State) -> Subscription<Message> {
                     else {
                         match &key {
                             keyboard::Key::Named(keyboard::key::Named::Enter) => bytes.extend_from_slice(b"\r"),
-                            keyboard::Key::Named(keyboard::key::Named::Backspace) => bytes.push(b'\x08'),
+                            keyboard::Key::Named(keyboard::key::Named::Backspace) => bytes.push(b'\x7f'),
                             keyboard::Key::Named(keyboard::key::Named::Tab) => bytes.extend_from_slice(b"\t"),
                             keyboard::Key::Named(keyboard::key::Named::ArrowUp) => bytes.extend_from_slice(b"\x1b[A"),
                             keyboard::Key::Named(keyboard::key::Named::ArrowDown) => bytes.extend_from_slice(b"\x1b[B"),
@@ -409,11 +521,23 @@ fn view(state: &State) -> Element<'_, Message> {
 
     let tab_content: Element<'_, Message> = if let Some(session) = state.sessions.get(state.active_index) {
         match session.kind {
-            SessionKind::Welcome => container(column![text("Connection Launcher").size(24).font(Font { weight: Weight::Bold, ..Default::default() }), column![text("SSH Connection").size(18).font(Font { weight: Weight::Bold, ..Default::default() }), row![text("Host: "), text_input("IP Address", &state.ssh_host).id(state.id_host.clone()).on_input(Message::HostChanged).on_submit(Message::TabPressed(false)).width(200)], row![text("Port: "), text_input("22", &state.ssh_port).id(state.id_port.clone()).on_input(Message::PortChanged).on_submit(Message::TabPressed(false)).width(100)], row![text("Username: "), text_input("user", &state.ssh_user).id(state.id_user.clone()).on_input(Message::UserChanged).on_submit(Message::TabPressed(false)).width(200)], row![text("Password: "), text_input("pass", &state.ssh_pass).id(state.id_pass.clone()).on_input(Message::PassChanged).secure(true).width(200).on_submit(Message::ConnectSsh)], button(text("Connect SSH")).padding(10).on_press(Message::ConnectSsh)].spacing(10), hr(), column![text("Local System").size(18).font(Font { weight: Weight::Bold, ..Default::default() }), button(text("Launch PowerShell")).padding(10).on_press(Message::ConnectLocal)].spacing(10)].spacing(20).width(Length::Fixed(400.0))).center(Length::Fill).into(),
+            SessionKind::Welcome => container(scrollable(column![text("Connection Launcher").size(24).font(Font { weight: Weight::Bold, ..Default::default() }), column![text("SSH Connection").size(18).font(Font { weight: Weight::Bold, ..Default::default() }), row![text("Host: "), text_input("IP Address", &state.ssh_host).id(state.id_host.clone()).on_input(Message::HostChanged).width(200)], row![text("Port: "), text_input("22", &state.ssh_port).id(state.id_port.clone()).on_input(Message::PortChanged).width(100)], row![text("Username: "), text_input("user", &state.ssh_user).id(state.id_user.clone()).on_input(Message::UserChanged).width(200)], row![text("Password: "), text_input("pass", &state.ssh_pass).id(state.id_pass.clone()).on_input(Message::PassChanged).secure(true).width(200).on_submit(Message::ConnectSsh)], button(text("Connect SSH")).padding(10).on_press(Message::ConnectSsh)].spacing(10), hr(), column![text("Telnet Connection").size(18).font(Font { weight: Weight::Bold, ..Default::default() }), row![text("Host: "), text_input("IP Address", &state.ssh_host).on_input(Message::HostChanged).width(200)], row![text("Port: "), text_input("23", &state.ssh_port).on_input(Message::PortChanged).width(100).on_submit(Message::ConnectTelnet)], button(text("Connect Telnet")).padding(10).on_press(Message::ConnectTelnet)].spacing(10), hr(), column![text("Local System").size(18).font(Font { weight: Weight::Bold, ..Default::default() }), button(text("Launch PowerShell")).padding(10).on_press(Message::ConnectLocal)].spacing(10)].spacing(20).width(Length::Fixed(400.0)))).center(Length::Fill).into(),
             SessionKind::Terminal => {
                 let hist_len = session.terminal.history.len();
                 let offset = session.terminal.display_offset;
-                row![container(TerminalView::new(&session.terminal, Message::TerminalScroll, Message::TerminalResize)).width(Length::Fill).height(Length::Fill), container(vertical_slider(0.0..=(hist_len as f32).max(1.0), offset as f32, |v| Message::TerminalScrollTo(v as usize)).step(1.0).style(|_, _| iced::widget::slider::Style { rail: iced::widget::slider::Rail { backgrounds: (iced::Background::Color(Color::from_rgb(0.1, 0.1, 0.1)), iced::Background::Color(Color::from_rgb(0.1, 0.1, 0.1))), width: 4.0, border: Default::default() }, handle: iced::widget::slider::Handle { shape: iced::widget::slider::HandleShape::Rectangle { width: 10, border_radius: 2.0f32.into() }, background: iced::Background::Color(Color::from_rgb(0.4, 0.4, 0.4)), border_width: 0.0, border_color: Color::TRANSPARENT } })).width(Length::Fixed(12.0)).height(Length::Fill).padding(2)].into()
+                row![
+                    container(TerminalView::new(
+                        &session.terminal,
+                        Message::TerminalScroll,
+                        Message::TerminalResize,
+                        Message::SelectionStart,
+                        Message::SelectionUpdate,
+                        || Message::CopyCurrentSelection,
+                    ))
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+                    container(vertical_slider(0.0..=(hist_len as f32).max(1.0), offset as f32, |v| Message::TerminalScrollTo(v as usize)).step(1.0).style(|_, _| iced::widget::slider::Style { rail: iced::widget::slider::Rail { backgrounds: (iced::Background::Color(Color::from_rgb(0.1, 0.1, 0.1)), iced::Background::Color(Color::from_rgb(0.1, 0.1, 0.1))), width: 4.0, border: Default::default() }, handle: iced::widget::slider::Handle { shape: iced::widget::slider::HandleShape::Rectangle { width: 10, border_radius: 2.0f32.into() }, background: iced::Background::Color(Color::from_rgb(0.4, 0.4, 0.4)), border_width: 0.0, border_color: Color::TRANSPARENT } })).width(Length::Fixed(12.0)).height(Length::Fill).padding(2)
+                ].into()
             }
         }
     } else { text("No active tab").into() };
@@ -477,3 +601,5 @@ fn view(state: &State) -> Element<'_, Message> {
 
     container(final_layout).width(Length::Fill).height(Length::Fill).style(|_| container::Style { background: Some(Background::Color(Color::from_rgb(0.08, 0.08, 0.08))), text_color: Some(Color::WHITE), ..Default::default() }).into()
 }
+
+

@@ -59,6 +59,13 @@ impl Line {
     }
 }
 
+// ─── 터미널 선택 영역 ────────────────────────────────────────────────────────
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Selection {
+    pub start: (usize, usize), // (col, row)
+    pub end: (usize, usize),   // (col, row)
+}
+
 // ─── 터미널 상태 ──────────────────────────────────────────────────────────────
 pub struct TerminalEmulator {
     pub cols: usize,
@@ -78,6 +85,11 @@ pub struct TerminalEmulator {
     pub ime_preedit: String,
     pub display_offset: usize, // 스크롤 위치 (0: 최하단)
     pub pending_responses: Vec<Vec<u8>>, // 터미널이 프로세스에게 보낼 응답 (예: 커서 위치)
+    pub selection: Option<Selection>,
+    pub last_csi: Option<(char, usize, bool)>, // ConPTY 버그 우회를 위한 마지막 CSI 액션 기억
+    pub history_prompt_y: Option<usize>, // 위로 점프한 프롬프트 Y좌표 기록 (잔상 청소기 용도)
+    pub history_clear_timeout: usize, // 위 좌표의 유효 수명 (CSI 명령 횟수)
+    pub history_printed_lines: std::collections::HashSet<usize>, // 잔상 청소 기간 중 텍스트가 인쇄된 라인 기록
 }
 
 impl Default for TerminalEmulator {
@@ -107,7 +119,17 @@ impl TerminalEmulator {
             ime_preedit: String::new(),
             display_offset: 0,
             pending_responses: Vec::new(),
+            selection: None,
+            last_csi: None,
+            history_prompt_y: None,
+            history_clear_timeout: 0,
+            history_printed_lines: std::collections::HashSet::new(),
         }
+
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.selection.is_some()
     }
 
     pub fn process_bytes(&mut self, bytes: &[u8]) {
@@ -121,6 +143,49 @@ impl TerminalEmulator {
     pub fn clear_preedit(&mut self) {
         self.ime_preedit.clear();
         self.cache.clear();
+    }
+
+    pub fn get_selected_text(&self) -> String {
+        let sel = match self.selection {
+            Some(s) => s,
+            None => return String::new(),
+        };
+
+        let (mut start_x, mut start_y) = sel.start;
+        let (mut end_x, mut end_y) = sel.end;
+
+        // Normalizing: ensure start is before end
+        if start_y > end_y || (start_y == end_y && start_x > end_x) {
+            std::mem::swap(&mut start_x, &mut end_x);
+            std::mem::swap(&mut start_y, &mut end_y);
+        }
+
+        let mut result = String::new();
+        for y in start_y..=end_y {
+            let line = if y < self.history.len() {
+                &self.history[y]
+            } else if y < self.history.len() + self.grid.len() {
+                &self.grid[y - self.history.len()]
+            } else {
+                continue;
+            };
+
+            let x_start = if y == start_y { start_x } else { 0 };
+            let x_end = if y == end_y { end_x } else { line.cells.len().saturating_sub(1) };
+
+            for x in x_start..=x_end {
+                if x < line.cells.len() {
+                    let ch = line.cells[x].ch;
+                    if ch != '\0' {
+                        result.push(ch);
+                    }
+                }
+            }
+            if y < end_y && !line.is_wrapped {
+                result.push('\n');
+            }
+        }
+        result
     }
 
     fn scroll_up_and_push_history(&mut self) {
@@ -166,13 +231,23 @@ impl TerminalEmulator {
             let line = &mut self.grid[row];
             match mode {
                 0 => { // To end
+                    // --- Wide-aware Cleanup: 만약 시작점이 와이드 캐릭터의 뒷부분(\0)이면 이전 칸도 지움 ---
+                    if self.cursor_x > 0 && line.cells[self.cursor_x].ch == '\0' {
+                        line.cells[self.cursor_x - 1] = blank;
+                    }
                     for x in self.cursor_x..self.cols { line.cells[x] = blank; }
+                    if self.cursor_x == 0 { line.is_wrapped = false; }
                 }
                 1 => { // To start
+                    // --- Wide-aware Cleanup: 만약 끝점이 와이드 캐릭터의 본체이면 다음 칸(\0)도 지움 ---
                     for x in 0..=self.cursor_x { if x < self.cols { line.cells[x] = blank; } }
+                    if self.cursor_x + 1 < self.cols && line.cells[self.cursor_x + 1].ch == '\0' {
+                        line.cells[self.cursor_x + 1] = blank;
+                    }
                 }
                 2 => { // All
                     for x in 0..self.cols { line.cells[x] = blank; }
+                    line.is_wrapped = false;
                 }
                 _ => {}
             }
@@ -235,14 +310,27 @@ impl TerminalEmulator {
                 continue;
             }
 
-            let chunks = logical.chunks(new_cols);
-            for (i, chunk) in chunks.enumerate() {
+            let mut i = 0;
+            let mut chunk_count = 0;
+            while i < logical.len() {
                 let mut new_line = Line::new(new_cols);
-                for (j, &cell) in chunk.iter().enumerate() {
-                    new_line.cells[j] = cell;
+                let mut added = 0;
+                while added < new_cols && i < logical.len() {
+                    let cell = logical[i];
+                    let w = if cell.ch == '\0' { 1 } else { unicode_width::UnicodeWidthChar::width(cell.ch).unwrap_or(1) };
+                    
+                    if w > 1 && added == new_cols - 1 {
+                        // Wide char won't fit at the end of the line
+                        break;
+                    }
+                    
+                    new_line.cells[added] = cell;
+                    added += w;
+                    i += 1;
                 }
-                new_line.is_wrapped = i > 0;
+                new_line.is_wrapped = chunk_count > 0;
                 new_all_lines.push(new_line);
+                chunk_count += 1;
             }
         }
 
@@ -359,29 +447,45 @@ struct TerminalPerformer<'a> { emulator: &'a mut TerminalEmulator }
 impl<'a> Perform for TerminalPerformer<'a> {
     fn print(&mut self, c: char) {
         let emu = &mut self.emulator;
+        let w = c.width().unwrap_or(1);
 
-        // 1. 래핑 처리: 현재 X 위치가 가득 찼으면 다음 줄로
-        if emu.cursor_x >= emu.cols {
+        // 1. 래핑 처리: 현재 X 위치 + 글자 너비가 가로 길이를 초과하면 다음 줄로
+        if emu.cursor_x + w > emu.cols {
             emu.cursor_x = 0;
-            let (_, bottom) = emu.scrolling_region;
+            let (top, bottom) = emu.scrolling_region;
             if emu.cursor_y < bottom {
                 emu.cursor_y += 1;
+                emu.clear_line(emu.cursor_y, 0); // 래핑 시 잔상 제거
                 emu.grid[emu.cursor_y].is_wrapped = true;
             } else if emu.cursor_y == bottom {
-                let (top, bottom) = emu.scrolling_region;
                 emu.scroll_up_in_region(top, bottom);
+                emu.clear_line(bottom, 0); // 스크롤 시 하단 행 초기화
                 emu.grid[bottom].is_wrapped = true;
             } else {
-                // Outside region, just move down if possible
                 if emu.cursor_y < emu.rows - 1 {
                     emu.cursor_y += 1;
                 }
             }
         }
 
-        let w = c.width().unwrap_or(1);
         if emu.cursor_y < emu.rows && emu.cursor_x < emu.cols {
+            if emu.history_clear_timeout > 0 {
+                emu.history_printed_lines.insert(emu.cursor_y);
+            }
+            
             let line = &mut emu.grid[emu.cursor_y];
+
+            // --- Wide-aware Cleanup: Overwriting part of a wide character ---
+            // 1. 만약 현재 위치에 와이드 캐릭터의 continuation(\0)이 있다면, 이전 칸(본래 글자)을 공백으로
+            if line.cells[emu.cursor_x].ch == '\0' && emu.cursor_x > 0 {
+                line.cells[emu.cursor_x - 1].ch = ' ';
+            }
+            // 2. 만약 현재 위치에 이미 와이드 캐릭터가 있고, 출력하려는 글자가 narrow(w=1)하거나 
+            //    다른 글자로 대체된다면, 다음 칸(\0)을 공백으로
+            if emu.cursor_x + 1 < emu.cols && line.cells[emu.cursor_x + 1].ch == '\0' {
+                line.cells[emu.cursor_x + 1].ch = ' ';
+            }
+
             line.cells[emu.cursor_x] = Cell { 
                 ch: c, 
                 fg: emu.current_fg, 
@@ -417,12 +521,13 @@ impl<'a> Perform for TerminalPerformer<'a> {
                 emu.grid[emu.cursor_y].is_wrapped = false; // 하드 엔터
             }
             b'\r'   => emu.cursor_x = 0,
-            b'\x08' => { // Backspace
+            b'\x08' => { // Backspace (Cursor Move Left)
                 if emu.cursor_x > 0 {
                     emu.cursor_x -= 1;
-                    if emu.grid[emu.cursor_y].cells[emu.cursor_x].ch == '\0' && emu.cursor_x > 0 {
-                        emu.cursor_x -= 1;
-                    }
+                } else if emu.cursor_y > 0 && emu.grid[emu.cursor_y].is_wrapped {
+                    // 이전 줄의 끝으로 래핑 (Reverse Wrap)
+                    emu.cursor_y -= 1;
+                    emu.cursor_x = emu.cols - 1;
                 }
             }
             b'\x07' => { /* Bell */ }
@@ -441,15 +546,133 @@ impl<'a> Perform for TerminalPerformer<'a> {
         let param1 = it.next().and_then(|p| p.first()).copied().unwrap_or(0) as usize;
 
         match action {
+            '@' => { // ICH (Insert Character)
+                let n = std::cmp::max(1, param1);
+                let y = emu.cursor_y;
+                let x = emu.cursor_x;
+                if y < emu.grid.len() {
+                    let blank = Cell { ch: ' ', fg: emu.current_fg, bg: emu.current_bg, bold: false, italic: false, underline: false };
+                    let line = &mut emu.grid[y];
+                    
+                    // --- Wide-aware Cleanup before shifting ---
+                    if x > 0 && line.cells[x].ch == '\0' {
+                        line.cells[x-1].ch = ' ';
+                        line.cells[x].ch = ' ';
+                    }
+
+                    for i in (x + n..emu.cols).rev() {
+                        line.cells[i] = line.cells[i - n];
+                    }
+                    for i in x..std::cmp::min(emu.cols, x + n) {
+                        line.cells[i] = blank;
+                    }
+
+                    // --- Wide-aware Cleanup after shifting ---
+                    if x + n < emu.cols && line.cells[x + n].ch == '\0' {
+                        line.cells[x + n].ch = ' ';
+                    }
+                }
+            }
+            'X' => { // ECH (Erase Character)
+                let n = std::cmp::max(1, param1);
+                let y = emu.cursor_y;
+                let x = emu.cursor_x;
+
+                // ConPTY 다중 행 잔상 우회 (2): 쉘이 위로 점프한 뒤(history_prompt_y 설정됨), 
+                // 프롬프트 좌표보다 아래 행(`y > history_y`)에서 X 명령을 내리는 것은
+                // 100% ConPTY가 다중 행 잔상을 치우려다 오작동(글자수 모자람, 위치 삑사리)하는 것입니다.
+                // 이럴 경우 ECH를 "전체 줄 비우기(Clear Line)"로 묻고 더블로 가버립니다.
+                // 같은 행(`y == prompt_y`)이거나, 하단 행 중 새 텍스트가 인쇄된 행(`history_printed_lines.contains`)일 때는, 
+                // 대체된 짧은 명령(또는 새 멀티행 명령어) 뒤에 남은 기나긴 흔적(오버행)을 지우려다
+                // 길이 값(n)을 오산하여 끝쪽 한글 잔상을 남기는 버그이므로, "커서부터 끝까지 완전 소거(EL 0)"로 격상시킵니다!
+                // 반면 새 텍스트가 전혀 인쇄되지 않은 하단 행은 순수히 과거 명령어 잔상(`Ghost`)이므로 절대 소거(EL 2)합니다.
+                if let Some(prompt_y) = emu.history_prompt_y {
+                    if y >= prompt_y {
+                        if emu.history_printed_lines.contains(&y) {
+                            emu.clear_line(y, 0); // 0: 새 텍스트가 있는 행은 오버행(끝부분)만 완벽히 소거
+                        } else {
+                            emu.clear_line(y, 2); // 2: 새 텍스트가 없는 빈 깡통 행은 통째로 삭제
+                        }
+                        emu.last_csi = Some(('X', param1, true));
+                        return; // 로직 즉시 종료
+                    }
+                }
+
+                if y < emu.grid.len() {
+                    let blank = Cell { ch: ' ', fg: emu.current_fg, bg: emu.current_bg, bold: false, italic: false, underline: false };
+                    let line = &mut emu.grid[y];
+
+                    // --- Wide-aware Cleanup before shifting ---
+                    if x > 0 && line.cells[x].ch == '\0' {
+                        line.cells[x-1].ch = ' ';
+                    }
+
+                    for i in x..emu.cols {
+                        if i + n < emu.cols {
+                            line.cells[i] = line.cells[i + n];
+                        } else {
+                            line.cells[i] = blank;
+                        }
+                    }
+
+                    // --- Wide-aware Cleanup after shifting: 
+                    // 만약 현재 위치(x)에 \0가 왔다면, 이전 글자가 사라졌으므로 공백으로 바꿈 ---
+                    if x < emu.cols && line.cells[x].ch == '\0' {
+                        line.cells[x].ch = ' ';
+                    }
+                }
+            }
             'A' => emu.cursor_y = emu.cursor_y.saturating_sub(std::cmp::max(1, param1)),
             'B' => emu.cursor_y = std::cmp::min(emu.rows - 1, emu.cursor_y + std::cmp::max(1, param1)),
-            'C' => emu.cursor_x = std::cmp::min(emu.cols - 1, emu.cursor_x + std::cmp::max(1, param1)),
-            'D' => emu.cursor_x = emu.cursor_x.saturating_sub(std::cmp::max(1, param1)),
+            'C' => { // CUF (Cursor Forward)
+                let n = std::cmp::max(1, param1);
+                
+                // ConPTY 다중 행 반쪽 지우기 에러 보정 로직 (스마트 휴리스틱)
+                // 만약 직전에 빈 공간만을 지우려는 무의미한 명령(X n)이 들어온 직후, 
+                // 정확히 똑같은 n 값으로 커서를 전진시킨다면 커서 동기화가 풀린 상태에서 뒷공간을 지운 치명적 오류입니다.
+                if let Some(('X', prev_n, target_is_empty)) = emu.last_csi {
+                    if prev_n == n && target_is_empty {
+                        // 명백한 ConPTY 삭제 델타 버그임이 확인되었으므로, 터미널이 능동적으로 해당 행 전체를 지워 잔상을 제거합니다.
+                        emu.clear_line(emu.cursor_y, 2);
+                    }
+                }
+                
+                emu.cursor_x = std::cmp::min(emu.cols - 1, emu.cursor_x + n);
+            }
+            'D' => { // CUB (Cursor Backward)
+                let n = std::cmp::max(1, param1);
+                emu.cursor_x = emu.cursor_x.saturating_sub(n);
+            }
             'H' | 'f' => { // CUP, HVP
                 let y = param1;
                 let x = it.next().and_then(|p| p.first()).copied().unwrap_or(1) as usize;
-                emu.cursor_y = std::cmp::min(emu.rows - 1, y.saturating_sub(1));
+                
+                let old_y = emu.cursor_y;
+                let new_y = std::cmp::min(emu.rows - 1, y.saturating_sub(1));
+                
+                // ConPTY 다중 행 잔상 우회 (1): 위로 점프할 경우, 
+                // 프롬프트 좌표(new_y)를 저장하여 이후 하단에 떨어지는 기형적 삭제 명령을 전면 소거로 승격시킬 준비를 합니다.
+                if new_y < old_y {
+                    emu.history_prompt_y = Some(new_y);
+                    emu.history_clear_timeout = 30; // 넉넉히 30번의 CSI 명령 동안만 유효
+                    emu.history_printed_lines.clear(); // 이전 출력 기록 초기화
+                    
+                    // 래핑된 연결 행이 있다면 1차로 모두 소거 (이전 로직 유지)
+                    if emu.grid[new_y].is_wrapped {
+                        let mut clear_y = new_y + 1;
+                        let mut prev_was_wrapped = true;
+                        
+                        while clear_y < emu.rows && prev_was_wrapped {
+                            prev_was_wrapped = emu.grid[clear_y].is_wrapped;
+                            emu.clear_line(clear_y, 2);
+                            clear_y += 1;
+                        }
+                    }
+                }
+                
+                emu.cursor_y = new_y;
                 emu.cursor_x = std::cmp::min(emu.cols - 1, x.saturating_sub(1));
+                emu.grid[emu.cursor_y].is_wrapped = false;
             }
             'm' => { // SGR - Colors and Attributes
                 let mut params_it = params.iter();
@@ -496,20 +719,26 @@ impl<'a> Perform for TerminalPerformer<'a> {
                 let y = emu.cursor_y;
                 let x = emu.cursor_x;
                 if y < emu.grid.len() {
+                    let blank = Cell { ch: ' ', fg: emu.current_fg, bg: emu.current_bg, bold: false, italic: false, underline: false };
                     let line = &mut emu.grid[y];
+                    
+                    // --- Wide-aware Cleanup before shifting ---
+                    if x > 0 && line.cells[x].ch == '\0' {
+                        line.cells[x-1].ch = ' ';
+                    }
+
                     for i in x..emu.cols {
                         if i + n < emu.cols {
                             line.cells[i] = line.cells[i + n];
                         } else {
-                            line.cells[i] = Cell { 
-                                ch: ' ', 
-                                fg: emu.current_fg, 
-                                bg: emu.current_bg,
-                                bold: false,
-                                italic: false,
-                                underline: false,
-                            };
+                            line.cells[i] = blank;
                         }
+                    }
+                    
+                    // --- Wide-aware Cleanup after shifting: 
+                    // 만약 현재 위치(x)에 \0가 왔다면, 이전 글자가 사라졌으므로 공백으로 바꿈 ---
+                    if x < emu.cols && line.cells[x].ch == '\0' {
+                        line.cells[x].ch = ' ';
                     }
                 }
             }
@@ -557,6 +786,23 @@ impl<'a> Perform for TerminalPerformer<'a> {
             }
             _ => {}
         }
+        
+        if emu.history_clear_timeout > 0 {
+            emu.history_clear_timeout -= 1;
+            if emu.history_clear_timeout == 0 {
+                emu.history_prompt_y = None;
+            }
+        }
+        
+        // Debug logging to a temp file for tracking exactly what the shell sends
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("kterm_debug_csi_v2.log") {
+            let mut p_str = String::new();
+            for p in params.iter() {
+                p_str.push_str(&format!("{:?};", p));
+            }
+            let _ = writeln!(f, "CSI: action={}, params={} x={} y={} limit_n={}", action, p_str, emu.cursor_x, emu.cursor_y, param1);
+        }
     }
 }
 
@@ -577,13 +823,38 @@ impl<Message> Program<Message> for TerminalEmulator {
             let end_idx = std::cmp::min(start_idx + self.rows, all_viewable.len());
             let visible_lines = &all_viewable[start_idx..end_idx];
 
+            let sel = self.selection.map(|s| {
+                let (mut start_x, mut start_y) = s.start;
+                let (mut end_x, mut end_y) = s.end;
+                if start_y > end_y || (start_y == end_y && start_x > end_x) {
+                    std::mem::swap(&mut start_x, &mut end_x);
+                    std::mem::swap(&mut start_y, &mut end_y);
+                }
+                ((start_x, start_y), (end_x, end_y))
+            });
+
             for (y, row) in visible_lines.iter().enumerate() {
+                let absolute_y = start_idx + y;
                 for (x, cell) in row.cells.iter().enumerate() {
                     let pos = Point::new(x as f32 * CHAR_WIDTH, y as f32 * ROW_HEIGHT);
                     
-                    // 1. 배경색 렌더링 (검정색이 아닐 때만)
-                    if cell.bg != Color::BLACK {
-                        frame.fill_rectangle(pos, Size::new(CHAR_WIDTH, ROW_HEIGHT), cell.bg);
+                    // 1. 배경색 렌더링
+                    let is_selected = if let Some(((sx, sy), (ex, ey))) = sel {
+                        if absolute_y > sy && absolute_y < ey { true }
+                        else if absolute_y == sy && absolute_y == ey { x >= sx && x <= ex }
+                        else if absolute_y == sy { x >= sx }
+                        else if absolute_y == ey { x <= ex }
+                        else { false }
+                    } else { false };
+
+                    let bg_color = if is_selected {
+                        Color::from_rgb(0.3, 0.3, 0.6)
+                    } else {
+                        cell.bg
+                    };
+
+                    if bg_color != Color::BLACK {
+                        frame.fill_rectangle(pos, Size::new(CHAR_WIDTH, ROW_HEIGHT), bg_color);
                     }
 
                     // 2. 텍스트 렌더링
@@ -591,7 +862,7 @@ impl<Message> Program<Message> for TerminalEmulator {
                         let mut t = Text::default();
                         t.content = cell.ch.to_string();
                         t.position = pos;
-                        t.color = cell.fg;
+                        t.color = if is_selected { Color::WHITE } else { cell.fg };
                         t.size = iced::Pixels(ROW_HEIGHT * 0.95);
                         
                         // Bold 속성 반영
@@ -643,17 +914,32 @@ pub struct TerminalView<'a, Message> {
     emulator: &'a TerminalEmulator,
     on_scroll: fn(f32) -> Message,
     on_resize: fn(usize, usize) -> Message,
+    on_selection_start: fn(usize, usize) -> Message,
+    on_selection_update: fn(usize, usize) -> Message,
+    on_right_click: fn() -> Message,
 }
 
 impl<'a, Message> TerminalView<'a, Message> {
-    pub fn new(emulator: &'a TerminalEmulator, on_scroll: fn(f32) -> Message, on_resize: fn(usize, usize) -> Message) -> Self {
-        Self { emulator, on_scroll, on_resize }
+    pub fn new(
+        emulator: &'a TerminalEmulator,
+        on_scroll: fn(f32) -> Message,
+        on_resize: fn(usize, usize) -> Message,
+        on_selection_start: fn(usize, usize) -> Message,
+        on_selection_update: fn(usize, usize) -> Message,
+        on_right_click: fn() -> Message,
+    ) -> Self {
+        Self { emulator, on_scroll, on_resize, on_selection_start, on_selection_update, on_right_click }
     }
 }
 
+#[derive(Default)]
+struct LocalState {
+    is_pressed: bool,
+}
+
 impl<'a, Message: Clone> Widget<Message, Theme, Renderer> for TerminalView<'a, Message> {
-    fn tag(&self) -> tree::Tag { tree::Tag::stateless() }
-    fn state(&self) -> tree::State { tree::State::None }
+    fn tag(&self) -> tree::Tag { tree::Tag::of::<LocalState>() }
+    fn state(&self) -> tree::State { tree::State::new(LocalState::default()) }
     fn children(&self) -> Vec<Tree> { vec![] }
     fn diff(&self, _tree: &mut Tree) {}
 
@@ -692,24 +978,19 @@ impl<'a, Message: Clone> Widget<Message, Theme, Renderer> for TerminalView<'a, M
     /// OS/Iced 런타임에 현재 터미널 커서 픽셀 위치를 알린다.
     fn update(
         &mut self,
-        _tree: &mut Tree,
+        tree: &mut Tree,
         event: &iced::Event,
         layout: Layout<'_>,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
         _renderer: &Renderer,
         _clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, Message>,
         _viewport: &Rectangle,
     ) {
+        let state = tree.state.downcast_mut::<LocalState>();
         let bounds = layout.bounds();
         let new_cols = (bounds.width / 10.0) as usize;
         let new_rows = (bounds.height / 20.0) as usize;
-
-        if new_cols > 0 && new_rows > 0 && (new_cols != self.emulator.cols || new_rows != self.emulator.rows) {
-            // main.rs로 리사이즈 요청 전송
-            // on_scroll처럼 콜백을 하나 더 추가하거나, TerminalResize 전용 콜백 도입 필요
-            // 여기서는 단순함을 위해 기존 TerminalResize 메시지를 활용하도록 main.rs 수정 필요
-        }
 
         match event {
             iced::Event::Window(iced::window::Event::RedrawRequested(_)) => {
@@ -724,6 +1005,33 @@ impl<'a, Message: Clone> Widget<Message, Theme, Renderer> for TerminalView<'a, M
                 match delta {
                     mouse::ScrollDelta::Lines { y, .. } | mouse::ScrollDelta::Pixels { y, .. } => {
                         shell.publish((self.on_scroll)(*y));
+                    }
+                }
+            }
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                state.is_pressed = true;
+                if let Some(cursor_pos) = cursor.position_in(bounds) {
+                    let col = (cursor_pos.x / 10.0) as usize;
+                    let row = (cursor_pos.y / 20.0) as usize;
+                    let start_idx = (self.emulator.history.len() + self.emulator.grid.len()).saturating_sub(self.emulator.rows + self.emulator.display_offset);
+                    let absolute_row = start_idx + row;
+                    shell.publish((self.on_selection_start)(col, absolute_row));
+                }
+            }
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                state.is_pressed = false;
+            }
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+                shell.publish((self.on_right_click)());
+            }
+            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if state.is_pressed {
+                    if let Some(cursor_pos) = cursor.position_in(bounds) {
+                        let col = (cursor_pos.x / 10.0) as usize;
+                        let row = (cursor_pos.y / 20.0) as usize;
+                        let start_idx = (self.emulator.history.len() + self.emulator.grid.len()).saturating_sub(self.emulator.rows + self.emulator.display_offset);
+                        let absolute_row = start_idx + row;
+                        shell.publish((self.on_selection_update)(col, absolute_row));
                     }
                 }
             }
