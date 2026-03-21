@@ -31,6 +31,11 @@
 
 아래 항목은 메타데이터 상 GPL/LGPL/MPL 문자열이 보이는 경우입니다. 모두 즉시 충돌이라는 뜻은 아니며, OR 라이선스일 경우 permissive 옵션 선택이 가능합니다.
 
+추가 참고 문서:
+
+- [docs/MPL-2.0_GUIDE.md](docs/MPL-2.0_GUIDE.md)
+- [docs/LICENSE-MPL-2.0](docs/LICENSE-MPL-2.0)
+
 - serialport 4.9.0: MPL-2.0
 - self_cell 1.2.2: Apache-2.0 OR GPL-2.0-only
 - unescaper 0.1.8: GPL-3.0/MIT
