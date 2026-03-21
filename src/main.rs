@@ -44,6 +44,14 @@ enum SessionKind {
     Terminal,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProtocolMode {
+    Ssh,
+    Telnet,
+    Serial,
+    Local,
+}
+
 struct Session {
     name: String,
     kind: SessionKind,
@@ -76,10 +84,13 @@ impl Session {
 struct State {
     sessions: Vec<Session>,
     active_index: usize,
+    welcome_protocol: ProtocolMode,
     ssh_host: String,
     ssh_port: String,
     ssh_user: String,
     ssh_pass: String,
+    serial_port: String,
+    serial_baud: String,
     id_host: Id,
     id_port: Id,
     id_user: Id,
@@ -95,10 +106,13 @@ impl Default for State {
         Self {
             sessions: vec![Session::welcome()],
             active_index: 0,
+            welcome_protocol: ProtocolMode::Ssh,
             ssh_host: "".to_string(),
             ssh_port: "22".to_string(),
             ssh_user: "".to_string(),
             ssh_pass: "".to_string(),
+            serial_port: "COM1".to_string(),
+            serial_baud: "115200".to_string(),
             id_host: Id::new("host"),
             id_port: Id::new("port"),
             id_user: Id::new("user"),
@@ -130,9 +144,13 @@ pub enum Message {
     PortChanged(String),
     UserChanged(String),
     PassChanged(String),
+    SerialPortChanged(String),
+    SerialBaudChanged(String),
+    SelectProtocol(ProtocolMode),
     ConnectSsh,
     ConnectTelnet,
     ConnectLocal,
+    ConnectSerial,
     TabPressed(bool),
     FieldFocused(usize),
     WindowIdCaptured(window::Id),
@@ -206,15 +224,24 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                     connection::ConnectionEvent::Data(data) => {
                         if !data.is_empty() {
                             session.terminal.process_bytes(&data);
-                            session.terminal.cache.clear(); // [ADD] 수신된 데이터로 그리드가 수정되었으므로 렌더링 캐시 무효화
+                            session.terminal.cache.clear();
                             let responses: Vec<Vec<u8>> = session.terminal.pending_responses.drain(..).collect();
                             for resp in responses {
                                 if let Some(ref sender) = session.sender { let _ = sender.send(connection::ConnectionInput::Data(resp)); }
                             }
                         }
                     }
-                    connection::ConnectionEvent::Disconnected => { session.sender = None; }
-                    connection::ConnectionEvent::Error(_e) => { session.sender = None; }
+                    connection::ConnectionEvent::Disconnected => {
+                        session.sender = None;
+                        session.terminal.process_bytes(b"\r\n\x1b[31m[Disconnected]\x1b[0m\r\n");
+                        session.terminal.cache.clear();
+                    }
+                    connection::ConnectionEvent::Error(e) => {
+                        session.sender = None;
+                        let msg = format!("\r\n\x1b[31m[Error: {}]\x1b[0m\r\n", e);
+                        session.terminal.process_bytes(msg.as_bytes());
+                        session.terminal.cache.clear();
+                    }
                 }
             }
             Task::none()
@@ -248,6 +275,9 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::PortChanged(s) => { state.ssh_port = s; Task::none() }
         Message::UserChanged(s) => { state.ssh_user = s; Task::none() }
         Message::PassChanged(s) => { state.ssh_pass = s; Task::none() }
+        Message::SerialPortChanged(s) => { state.serial_port = s; Task::none() }
+        Message::SerialBaudChanged(s) => { state.serial_baud = s; Task::none() }
+        Message::SelectProtocol(mode) => { state.welcome_protocol = mode; Task::none() }
         Message::ConnectSsh => {
             let host = state.ssh_host.clone();
             let port: u16 = state.ssh_port.parse().unwrap_or(22);
@@ -269,6 +299,16 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 *session = Session::new_terminal(name, session.terminal.rows, session.terminal.cols);
             }
             Task::run(connection::telnet::connect_and_subscribe(host, port), move |event| Message::ConnectionMessage(target_index, event))
+        }
+        Message::ConnectSerial => {
+            let port_name = state.serial_port.clone();
+            let baud: u32 = state.serial_baud.parse().unwrap_or(115200);
+            let name = format!("Serial: {} ({}bps)", port_name, baud);
+            let target_index = state.active_index;
+            if let Some(session) = state.sessions.get_mut(target_index) {
+                *session = Session::new_terminal(name, session.terminal.rows, session.terminal.cols);
+            }
+            Task::run(connection::serial::connect_and_subscribe(port_name, baud), move |event| Message::ConnectionMessage(target_index, event))
         }
         Message::ConnectLocal => {
             let name = "Local: PowerShell".to_string();
@@ -397,7 +437,9 @@ fn subscription(state: &State) -> Subscription<Message> {
     let tab_sub = event::listen_with(|event, _status, _window| {
         match event {
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
-                if key == keyboard::Key::Named(keyboard::key::Named::Tab) { Some(Message::TabPressed(modifiers.shift())) } else { None }
+                if key == keyboard::Key::Named(keyboard::key::Named::Tab) { Some(Message::TabPressed(modifiers.shift())) }
+                else if key == keyboard::Key::Named(keyboard::key::Named::Escape) { Some(Message::TabPressed(false)) }
+                else { None }
             }
             _ => None
         }
@@ -497,33 +539,146 @@ fn view(state: &State) -> Element<'_, Message> {
         ].height(Length::Fixed(35.0)).align_y(iced::Alignment::Center)
     ).style(|_| container::Style { background: Some(Background::Color(Color::from_rgb(0.12, 0.12, 0.12))), ..Default::default() });
 
-    let mut tab_bar = row![].spacing(2).padding([2, 10]);
+    let mut tab_bar = row![].spacing(0).padding(0);
     for (i, session) in state.sessions.iter().enumerate() {
         let is_active = i == state.active_index;
-        let label = text(session.name.clone()).size(12);
-        let tab_btn = if is_active {
-            button(label).padding([5, 12]).style(|_, _| button::Style {
-                background: Some(Background::Color(Color::from_rgb(0.2, 0.4, 0.6))), text_color: Color::WHITE,
-                border: iced::Border { radius: iced::border::Radius { top_left: 4.0, top_right: 4.0, ..Default::default() }, ..Default::default() }, ..button::Style::default()
-            })
+        let tab_bg = if is_active { Color::from_rgb(0.08, 0.08, 0.08) } else { Color::from_rgb(0.12, 0.12, 0.12) };
+        let border_color = if is_active { Color::from_rgb(0.35, 0.35, 0.35) } else { Color::from_rgb(0.22, 0.22, 0.22) };
+
+        // 내부 버튼은 완전 투명 → 부모 컨테이너가 배경/외곽선 일괄 담당
+        let label_btn = button(text(session.name.clone()).size(12))
+            .padding([6, 12])
+            .style(move |_t, _s| {
+                button::Style {
+                    background: Some(Background::Color(Color::TRANSPARENT)),
+                    text_color: if is_active { Color::WHITE } else { Color::from_rgb(0.6, 0.6, 0.6) },
+                    ..Default::default()
+                }
+            }).on_press(Message::TabSelected(i));
+
+        let tab_item: Element<'_, Message> = if state.sessions.len() > 1 {
+            let close_btn = button(text("✕").size(10))
+                .padding([6, 8])
+                .style(move |_t, s| {
+                    button::Style {
+                        background: Some(Background::Color(Color::TRANSPARENT)),
+                        text_color: if matches!(s, button::Status::Hovered) { Color::from_rgb(0.9, 0.4, 0.4) } else { Color::from_rgb(0.45, 0.45, 0.45) },
+                        ..Default::default()
+                    }
+                }).on_press(Message::CloseTab(i));
+
+            container(row![label_btn, close_btn].align_y(iced::Alignment::Center))
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(tab_bg)),
+                    border: iced::Border { radius: iced::border::Radius { top_left: 6.0, top_right: 6.0, ..Default::default() }, width: 1.0, color: border_color },
+                    ..Default::default()
+                }).into()
         } else {
-            button(label).padding([5, 12]).style(|_t, s| {
-                let mut style = button::secondary(_t, s);
-                style.background = Some(Background::Color(if matches!(s, button::Status::Hovered) { Color::from_rgb(0.25, 0.25, 0.25) } else { Color::from_rgb(0.15, 0.15, 0.15) }));
-                style.border.radius = iced::border::Radius { top_left: 4.0, top_right: 4.0, ..Default::default() };
-                style
-            }).on_press(Message::TabSelected(i))
+            container(label_btn)
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(tab_bg)),
+                    border: iced::Border { radius: iced::border::Radius { top_left: 6.0, top_right: 6.0, ..Default::default() }, width: 1.0, color: border_color },
+                    ..Default::default()
+                }).into()
         };
-        let tab_item = if state.sessions.len() > 1 { row![tab_btn, button(text("✕").size(10)).padding([5, 8]).style(button::secondary).on_press(Message::CloseTab(i))].spacing(0) } else { row![tab_btn] };
+
         tab_bar = tab_bar.push(tab_item);
     }
-    tab_bar = tab_bar.push(button(text("+").size(14)).padding([4, 10]).style(button::secondary).on_press(Message::NewSshTab));
+    tab_bar = tab_bar.push(button(text("+").size(14)).padding([4, 8]).style(|_t, s| {
+        let mut style = button::text(_t, s);
+        if matches!(s, button::Status::Hovered) { style.background = Some(Background::Color(Color::from_rgb(0.2, 0.2, 0.2))); }
+        style.text_color = Color::from_rgb(0.6, 0.6, 0.6);
+        style.border.radius = 4.0.into();
+        style
+    }).on_press(Message::NewSshTab));
 
     let sidebar = container(column![text("SESSIONS").size(12).font(Font { weight: Weight::Bold, ..Default::default() }), hr(), scrollable(column![button(text("+ New SSH").size(13)).width(Length::Fill).style(button::secondary).on_press(Message::NewSshTab)].spacing(8)).height(Length::Fill)].spacing(10)).padding(10).width(Length::Fixed(180.0)).style(|_| container::Style { background: Some(Background::Color(Color::from_rgb(0.1, 0.1, 0.1))), ..Default::default() });
 
     let tab_content: Element<'_, Message> = if let Some(session) = state.sessions.get(state.active_index) {
         match session.kind {
-            SessionKind::Welcome => container(scrollable(column![text("Connection Launcher").size(24).font(Font { weight: Weight::Bold, ..Default::default() }), column![text("SSH Connection").size(18).font(Font { weight: Weight::Bold, ..Default::default() }), row![text("Host: "), text_input("IP Address", &state.ssh_host).id(state.id_host.clone()).on_input(Message::HostChanged).width(200)], row![text("Port: "), text_input("22", &state.ssh_port).id(state.id_port.clone()).on_input(Message::PortChanged).width(100)], row![text("Username: "), text_input("user", &state.ssh_user).id(state.id_user.clone()).on_input(Message::UserChanged).width(200)], row![text("Password: "), text_input("pass", &state.ssh_pass).id(state.id_pass.clone()).on_input(Message::PassChanged).secure(true).width(200).on_submit(Message::ConnectSsh)], button(text("Connect SSH")).padding(10).on_press(Message::ConnectSsh)].spacing(10), hr(), column![text("Telnet Connection").size(18).font(Font { weight: Weight::Bold, ..Default::default() }), row![text("Host: "), text_input("IP Address", &state.ssh_host).on_input(Message::HostChanged).width(200)], row![text("Port: "), text_input("23", &state.ssh_port).on_input(Message::PortChanged).width(100).on_submit(Message::ConnectTelnet)], button(text("Connect Telnet")).padding(10).on_press(Message::ConnectTelnet)].spacing(10), hr(), column![text("Local System").size(18).font(Font { weight: Weight::Bold, ..Default::default() }), button(text("Launch PowerShell")).padding(10).on_press(Message::ConnectLocal)].spacing(10)].spacing(20).width(Length::Fixed(400.0)))).center(Length::Fill).into(),
+            SessionKind::Welcome => {
+                let protocol_btn = |mode: ProtocolMode, label: &str, current: &ProtocolMode| {
+                    let is_active = mode == *current;
+                    button(container(text(label.to_string()).size(15)).center_x(Length::Fill))
+                        .width(Length::Fixed(110.0))
+                        .padding([8, 0])
+                        .style(move |_t, s| {
+                            let mut st = button::secondary(_t, s);
+                            if is_active {
+                                st.background = Some(Background::Color(Color::from_rgb(0.2, 0.4, 0.6)));
+                                st.text_color = Color::WHITE;
+                            } else {
+                                st.background = Some(Background::Color(if matches!(s, button::Status::Hovered) { Color::from_rgb(0.18, 0.18, 0.18) } else { Color::from_rgb(0.12, 0.12, 0.12) }));
+                                st.text_color = Color::from_rgb(0.7, 0.7, 0.7);
+                            }
+                            st.border.radius = 4.0.into();
+                            st
+                        })
+                        .on_press(Message::SelectProtocol(mode.clone()))
+                };
+
+                let protocol_tabs = row![
+                    protocol_btn(ProtocolMode::Ssh, "SSH", &state.welcome_protocol),
+                    protocol_btn(ProtocolMode::Telnet, "Telnet", &state.welcome_protocol),
+                    protocol_btn(ProtocolMode::Serial, "Serial", &state.welcome_protocol),
+                    protocol_btn(ProtocolMode::Local, "Local Shell", &state.welcome_protocol),
+                ].spacing(10);
+
+                let form_content: Element<'_, Message> = match state.welcome_protocol {
+                    ProtocolMode::Ssh => column![
+                        text("SSH Connection").size(20).font(Font { weight: Weight::Bold, ..Default::default() }),
+                        hr(),
+                        row![text("Host: ").width(100), text_input("IP Address", &state.ssh_host).id(state.id_host.clone()).on_input(Message::HostChanged).width(300)],
+                        row![text("Port: ").width(100), text_input("22", &state.ssh_port).id(state.id_port.clone()).on_input(Message::PortChanged).width(150)],
+                        row![text("Username: ").width(100), text_input("user", &state.ssh_user).id(state.id_user.clone()).on_input(Message::UserChanged).width(300)],
+                        row![text("Password: ").width(100), text_input("pass", &state.ssh_pass).id(state.id_pass.clone()).on_input(Message::PassChanged).secure(true).width(300).on_submit(Message::ConnectSsh)],
+                        Space::new().height(Length::Fixed(10.0)),
+                        button(container(text("Connect")).center_x(Length::Fill).center_y(Length::Fill)).padding(12).width(Length::Fill).style(button::primary).on_press(Message::ConnectSsh)
+                    ].spacing(15).into(),
+                    ProtocolMode::Telnet => column![
+                        text("Telnet Connection").size(20).font(Font { weight: Weight::Bold, ..Default::default() }),
+                        hr(),
+                        row![text("Host: ").width(100), text_input("IP Address", &state.ssh_host).on_input(Message::HostChanged).width(300)],
+                        row![text("Port: ").width(100), text_input("23", &state.ssh_port).on_input(Message::PortChanged).width(150).on_submit(Message::ConnectTelnet)],
+                        Space::new().height(Length::Fixed(10.0)),
+                        button(container(text("Connect")).center_x(Length::Fill).center_y(Length::Fill)).padding(12).width(Length::Fill).style(button::primary).on_press(Message::ConnectTelnet)
+                    ].spacing(15).into(),
+                    ProtocolMode::Serial => column![
+                        text("Serial Connection").size(20).font(Font { weight: Weight::Bold, ..Default::default() }),
+                        hr(),
+                        row![text("COM Port: ").width(100), text_input("COM1", &state.serial_port).on_input(Message::SerialPortChanged).width(300)],
+                        row![text("Baud Rate: ").width(100), text_input("115200", &state.serial_baud).on_input(Message::SerialBaudChanged).width(150).on_submit(Message::ConnectSerial)],
+                        Space::new().height(Length::Fixed(10.0)),
+                        button(container(text("Connect")).center_x(Length::Fill).center_y(Length::Fill)).padding(12).width(Length::Fill).style(button::primary).on_press(Message::ConnectSerial)
+                    ].spacing(15).into(),
+                    ProtocolMode::Local => column![
+                        text("Local System").size(20).font(Font { weight: Weight::Bold, ..Default::default() }),
+                        hr(),
+                        text("Launch a local PowerShell terminal session directly within kterm.").size(14),
+                        Space::new().height(Length::Fixed(10.0)),
+                        button(container(text("Launch PowerShell")).center_x(Length::Fill).center_y(Length::Fill)).padding(12).width(Length::Fill).style(button::primary).on_press(Message::ConnectLocal)
+                    ].spacing(15).into(),
+                };
+
+                let card_container = container(form_content)
+                    .width(Length::Fixed(500.0))
+                    .padding(30)
+                    .style(|_| container::Style {
+                        background: Some(Background::Color(Color::from_rgb(0.14, 0.14, 0.14))),
+                        border: iced::Border { radius: 8.0.into(), width: 1.0, color: Color::from_rgb(0.25, 0.25, 0.25) },
+                        ..Default::default()
+                    });
+
+                container(scrollable(
+                    column![
+                        text("Start a new session").size(28).font(Font { weight: Weight::Bold, ..Default::default() }),
+                        Space::new().height(Length::Fixed(30.0)),
+                        protocol_tabs,
+                        Space::new().height(Length::Fixed(15.0)),
+                        card_container,
+                    ].align_x(iced::alignment::Horizontal::Center)
+                )).center(Length::Fill).into()
+            }
             SessionKind::Terminal => {
                 let hist_len = session.terminal.history.len();
                 let offset = session.terminal.display_offset;

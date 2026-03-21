@@ -1,7 +1,9 @@
+
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 pub mod ssh;
 pub mod telnet;
+pub mod serial;
 
 use tokio::sync::mpsc;
 
@@ -39,4 +41,5 @@ impl Clone for ConnectionEvent {
         }
     }
 }
+
 
