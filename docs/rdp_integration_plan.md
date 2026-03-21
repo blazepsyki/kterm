@@ -12,6 +12,9 @@
 - `src/connection/rdp.rs` 스캐폴드 추가 완료.
 - RDP 탭 생성/세션 이벤트 라우팅(세션 ID 기반) 연결 완료.
 - 의존성 충돌 해소: `russh`를 `0.55.0`으로 낮추고 `ironrdp`를 동일 바이너리에 통합 가능 상태 확인.
+- ActiveStage 기반 연속 프레임 수신 루프(응답 프레임 송신 포함) 연결 완료.
+- `remote_display` 공통 모듈과 RDP 탭 이미지 렌더링(Full/Rect) 연동 완료.
+- 기본 입력 매핑 완료: 키보드(FastPath scancode/unicode), 마우스(이동/클릭/휠).
 
 ## 아키텍처 방향
 - 단기(Phase 1): 기존 `ConnectionEvent` 채널을 재사용해 연결 수명주기 안정화.
@@ -45,16 +48,18 @@
 - [x] Cargo 의존성 해소(`russh 0.55.0` + `ironrdp 0.14.0`) 및 `cargo check` 통과
 - [x] IronRDP 실제 핸드셰이크 적용(Connector + TLS upgrade + finalize)
 - [ ] 연결 실패/인증 실패/종료 사유 세분화
-- [ ] ActiveStage 기반 그래픽 프레임 수신 루프 연결
+- [x] ActiveStage 기반 그래픽 프레임 수신 루프 1차 연결(프로브/응답 프레임 송신)
+- [ ] ActiveStage 출력을 Iced 렌더링 상태로 직접 브리지
 
 ### Phase 2: 그래픽 파이프라인
-- [ ] 공통 렌더링 모듈 `remote_display` 생성
-- [ ] RDP/VNC 공용 `FrameUpdate` 타입 확정
-- [ ] `RemoteDisplayState`(프레임 버퍼) 구현
-- [ ] Iced 렌더링용 변환 레이어 구현(프로토콜 비종속)
-- [ ] RDP 프레임 수신 루프 구축
-- [ ] 프레임 버퍼(RGBA) 상태 저장 및 갱신
-- [ ] Iced 이미지 렌더링으로 화면 표시
+- [x] 공통 렌더링 모듈 `remote_display` 생성
+- [x] RDP/VNC 공용 `FrameUpdate` 타입 확정(초기: Full 프레임)
+- [x] `RemoteDisplayState`(프레임 버퍼) 구현
+- [x] Iced 렌더링용 변환 레이어 구현(초기: RGBA Handle 생성)
+- [x] RDP 프레임 수신 루프 구축(기본 스트리밍)
+- [x] 프레임 버퍼(RGBA) 상태 저장 및 갱신(Full/Rect 적용)
+- [x] Iced 이미지 렌더링으로 화면 표시(초기: RDP 탭에 FrameUpdate 반영)
+- [x] Rect 기반 부분 프레임 업데이트 경로 추가(FrameUpdate::Rect)
 - [ ] 프레임 스로틀(예: 30fps 상한) 도입
 
 ### Phase 2.5: VNC 대비 공통화 검증
@@ -63,14 +68,20 @@
 - [ ] VNC 백엔드 연결 시 코드 변경 최소화(목표: UI 코드 변경 0 또는 극소)
 
 ### Phase 3: 입력/상호작용
-- [ ] 키보드 입력을 RDP 스캔코드로 매핑
-- [ ] 마우스 이동/클릭/휠 이벤트 매핑
+- [x] 키보드 입력을 RDP FastPath(스캔코드/유니코드)로 기본 매핑
+- [x] 마우스 이동/클릭/휠 이벤트 기본 매핑
 - [ ] 포커스 및 입력 캡처 정책 정리
 
 ### Phase 4: 세션 품질
 - [ ] 윈도우 리사이즈를 원격 해상도 변경으로 반영
 - [ ] 탭 전환/닫기 시 리소스 누수 없는 종료
 - [ ] 재접속 UX 및 오류 재시도 정책 정리
+
+### Phase 5: 품질 고도화 (후속)
+- [ ] 포커스/입력 캡처 정책 정교화
+- [ ] 키 조합/로케일/IME 입력 정밀 매핑
+- [ ] 스로틀/드롭 정책 튜닝 및 성능 계측
+- [ ] 불안정 네트워크에서 회복력 강화
 
 ## 검증 체크리스트
 - [ ] RDP 접속 성공 시 원격 화면이 표시된다.

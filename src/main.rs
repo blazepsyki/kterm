@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use iced::widget::{button, column, container, pick_list, row, scrollable, text, vertical_slider, Space, text_input, Id, mouse_area, stack};
+use iced::widget::{button, column, container, image as iced_image, pick_list, row, scrollable, text, vertical_slider, Space, text_input, Id, mouse_area, stack};
 use iced::{Background, Color, Element, Length, Task, Subscription, event, keyboard, advanced::input_method, Font, font::Weight, mouse};
 use iced::widget::operation::focus;
 use iced::window;
@@ -10,6 +10,8 @@ use std::path::Path;
 mod terminal;
 mod connection;
 mod platform;
+mod remote_display;
+use remote_display::RemoteDisplayState;
 use terminal::{TerminalEmulator, TerminalView, Selection};
 use tokio::sync::mpsc;
 
@@ -45,6 +47,7 @@ pub fn main() -> iced::Result {
 enum SessionKind {
     Welcome,
     Terminal,
+    RemoteDisplay,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +133,7 @@ struct Session {
     name: String,
     kind: SessionKind,
     terminal: TerminalEmulator,
+    remote_display: Option<RemoteDisplayState>,
     sender: Option<mpsc::UnboundedSender<connection::ConnectionInput>>,
 }
 
@@ -140,6 +144,7 @@ impl Session {
             name: "Welcome".to_string(),
             kind: SessionKind::Welcome,
             terminal: TerminalEmulator::new(24, 80),
+            remote_display: None,
             sender: None,
         }
     }
@@ -150,6 +155,18 @@ impl Session {
             name,
             kind: SessionKind::Terminal,
             terminal: TerminalEmulator::new(rows, cols),
+            remote_display: None,
+            sender: None,
+        }
+    }
+
+    fn new_remote_display(id: u64, name: String, width: u16, height: u16) -> Self {
+        Self {
+            id,
+            name,
+            kind: SessionKind::RemoteDisplay,
+            terminal: TerminalEmulator::new(24, 80),
+            remote_display: Some(RemoteDisplayState::new(width, height)),
             sender: None,
         }
     }
@@ -269,6 +286,7 @@ pub enum Message {
     PasteData(Option<String>),
     ClearSelection,
     TryHandleKey(keyboard::Key, keyboard::Modifiers),
+    RemoteRdpInput(connection::RdpInput),
 }
 
 // ---------- Update ----------
@@ -333,6 +351,14 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                             for resp in responses {
                                 if let Some(ref sender) = session.sender { let _ = sender.send(connection::ConnectionInput::Data(resp)); }
                             }
+                        }
+                    }
+                    connection::ConnectionEvent::Frame(frame) => {
+                        if session.remote_display.is_none() {
+                            session.remote_display = Some(RemoteDisplayState::new(1280, 1024));
+                        }
+                        if let Some(display) = session.remote_display.as_mut() {
+                            display.apply(frame);
                         }
                     }
                     connection::ConnectionEvent::Disconnected => {
@@ -402,7 +428,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             let mut target_id = None;
             if let Some(session) = state.sessions.get_mut(target_index) {
                 target_id = Some(session.id);
-                *session = Session::new_terminal(session.id, name, session.terminal.rows, session.terminal.cols);
+                *session = Session::new_remote_display(session.id, name, 1280, 1024);
             }
             if let Some(target_id) = target_id {
                 Task::run(connection::ssh::connect_and_subscribe(host, port, user, pass), move |event| Message::ConnectionMessage(target_id, event))
@@ -571,6 +597,14 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::RemoteRdpInput(input) => {
+            if let Some(session) = state.sessions.get_mut(state.active_index) {
+                if let Some(ref sender) = session.sender {
+                    let _ = sender.send(connection::ConnectionInput::RdpInput(input));
+                }
+            }
+            Task::none()
+        }
         Message::TabPressed(shift) => {
             if shift { state.focused_field = if state.focused_field == 0 { 3 } else { state.focused_field - 1 }; }
             else { state.focused_field = (state.focused_field + 1) % 4; }
@@ -621,7 +655,9 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
 }
 
 fn subscription(state: &State) -> Subscription<Message> {
-    let is_welcome = matches!(state.sessions.get(state.active_index).map(|s| &s.kind), Some(SessionKind::Welcome));
+    let active_kind = state.sessions.get(state.active_index).map(|s| &s.kind);
+    let is_welcome = matches!(active_kind, Some(SessionKind::Welcome));
+    let is_terminal = matches!(active_kind, Some(SessionKind::Terminal));
     
     let mouse_sub = event::listen_with(|event, _status, _window| {
         match event {
@@ -656,7 +692,7 @@ fn subscription(state: &State) -> Subscription<Message> {
         let mut subs = vec![tab_sub, mouse_sub, menu_close_sub];
         if state.window_id.is_none() { subs.push(window::open_events().map(Message::WindowIdCaptured)); }
         Subscription::batch(subs)
-    } else {
+    } else if is_terminal {
         let term_sub = event::listen_with(|event, _status, _window| {
             match event {
                 iced::Event::InputMethod(ime) => {
@@ -708,6 +744,112 @@ fn subscription(state: &State) -> Subscription<Message> {
         let mut subs = vec![term_sub, mouse_sub, menu_close_sub];
         if state.window_id.is_none() { subs.push(window::open_events().map(Message::WindowIdCaptured)); }
         Subscription::batch(subs)
+    } else {
+        let remote_sub = event::listen_with(|event, _status, _window| {
+            match event {
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, text, .. }) => {
+                    if let Some(ch) = text.and_then(|t| t.chars().next()) {
+                        let codepoint = ch as u32;
+                        if codepoint <= 0xFFFF {
+                            return Some(Message::RemoteRdpInput(connection::RdpInput::KeyboardUnicode {
+                                codepoint: codepoint as u16,
+                                down: true,
+                            }));
+                        }
+                    }
+
+                    map_key_to_rdp_scancode(&key).map(|(code, extended)| {
+                        Message::RemoteRdpInput(connection::RdpInput::KeyboardScancode {
+                            code,
+                            extended,
+                            down: true,
+                        })
+                    })
+                }
+                iced::Event::Keyboard(keyboard::Event::KeyReleased { key, .. }) => {
+                    map_key_to_rdp_scancode(&key).map(|(code, extended)| {
+                        Message::RemoteRdpInput(connection::RdpInput::KeyboardScancode {
+                            code,
+                            extended,
+                            down: false,
+                        })
+                    })
+                }
+                iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                    Some(Message::RemoteRdpInput(connection::RdpInput::MouseMove {
+                        x: position.x.max(0.0).min(u16::MAX as f32) as u16,
+                        y: position.y.max(0.0).min(u16::MAX as f32) as u16,
+                    }))
+                }
+                iced::Event::Mouse(mouse::Event::ButtonPressed(button)) => {
+                    match button {
+                        mouse::Button::Left => Some(Message::RemoteRdpInput(connection::RdpInput::MouseButton { button: connection::RdpMouseButton::Left, down: true })),
+                        mouse::Button::Right => Some(Message::RemoteRdpInput(connection::RdpInput::MouseButton { button: connection::RdpMouseButton::Right, down: true })),
+                        mouse::Button::Middle => Some(Message::RemoteRdpInput(connection::RdpInput::MouseButton { button: connection::RdpMouseButton::Middle, down: true })),
+                        _ => None,
+                    }
+                }
+                iced::Event::Mouse(mouse::Event::ButtonReleased(button)) => {
+                    match button {
+                        mouse::Button::Left => Some(Message::RemoteRdpInput(connection::RdpInput::MouseButton { button: connection::RdpMouseButton::Left, down: false })),
+                        mouse::Button::Right => Some(Message::RemoteRdpInput(connection::RdpInput::MouseButton { button: connection::RdpMouseButton::Right, down: false })),
+                        mouse::Button::Middle => Some(Message::RemoteRdpInput(connection::RdpInput::MouseButton { button: connection::RdpMouseButton::Middle, down: false })),
+                        _ => None,
+                    }
+                }
+                iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                    let v = match delta {
+                        mouse::ScrollDelta::Lines { y, .. } => y,
+                        mouse::ScrollDelta::Pixels { y, .. } => y / 40.0,
+                    };
+                    let step = (v * 120.0).round();
+                    if step == 0.0 {
+                        None
+                    } else {
+                        Some(Message::RemoteRdpInput(connection::RdpInput::MouseWheel {
+                            delta: step.max(i16::MIN as f32).min(i16::MAX as f32) as i16,
+                        }))
+                    }
+                }
+                _ => None,
+            }
+        });
+
+        let mut subs = vec![mouse_sub, menu_close_sub, remote_sub];
+        if state.window_id.is_none() { subs.push(window::open_events().map(Message::WindowIdCaptured)); }
+        Subscription::batch(subs)
+    }
+}
+
+fn map_key_to_rdp_scancode(key: &keyboard::Key) -> Option<(u8, bool)> {
+    match key {
+        keyboard::Key::Named(keyboard::key::Named::Enter) => Some((0x1C, false)),
+        keyboard::Key::Named(keyboard::key::Named::Backspace) => Some((0x0E, false)),
+        keyboard::Key::Named(keyboard::key::Named::Tab) => Some((0x0F, false)),
+        keyboard::Key::Named(keyboard::key::Named::Escape) => Some((0x01, false)),
+        keyboard::Key::Named(keyboard::key::Named::ArrowUp) => Some((0x48, true)),
+        keyboard::Key::Named(keyboard::key::Named::ArrowDown) => Some((0x50, true)),
+        keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => Some((0x4B, true)),
+        keyboard::Key::Named(keyboard::key::Named::ArrowRight) => Some((0x4D, true)),
+        keyboard::Key::Named(keyboard::key::Named::Home) => Some((0x47, true)),
+        keyboard::Key::Named(keyboard::key::Named::End) => Some((0x4F, true)),
+        keyboard::Key::Named(keyboard::key::Named::PageUp) => Some((0x49, true)),
+        keyboard::Key::Named(keyboard::key::Named::PageDown) => Some((0x51, true)),
+        keyboard::Key::Named(keyboard::key::Named::Insert) => Some((0x52, true)),
+        keyboard::Key::Named(keyboard::key::Named::Delete) => Some((0x53, true)),
+        keyboard::Key::Named(keyboard::key::Named::F1) => Some((0x3B, false)),
+        keyboard::Key::Named(keyboard::key::Named::F2) => Some((0x3C, false)),
+        keyboard::Key::Named(keyboard::key::Named::F3) => Some((0x3D, false)),
+        keyboard::Key::Named(keyboard::key::Named::F4) => Some((0x3E, false)),
+        keyboard::Key::Named(keyboard::key::Named::F5) => Some((0x3F, false)),
+        keyboard::Key::Named(keyboard::key::Named::F6) => Some((0x40, false)),
+        keyboard::Key::Named(keyboard::key::Named::F7) => Some((0x41, false)),
+        keyboard::Key::Named(keyboard::key::Named::F8) => Some((0x42, false)),
+        keyboard::Key::Named(keyboard::key::Named::F9) => Some((0x43, false)),
+        keyboard::Key::Named(keyboard::key::Named::F10) => Some((0x44, false)),
+        keyboard::Key::Named(keyboard::key::Named::F11) => Some((0x57, false)),
+        keyboard::Key::Named(keyboard::key::Named::F12) => Some((0x58, false)),
+        _ => None,
     }
 }
 
@@ -942,6 +1084,34 @@ fn view(state: &State) -> Element<'_, Message> {
                     .height(Length::Fill),
                     container(vertical_slider(0.0..=(hist_len as f32).max(1.0), offset as f32, |v| Message::TerminalScrollTo(v as usize)).step(1.0).style(|_, _| iced::widget::slider::Style { rail: iced::widget::slider::Rail { backgrounds: (iced::Background::Color(Color::from_rgb(0.1, 0.1, 0.1)), iced::Background::Color(Color::from_rgb(0.1, 0.1, 0.1))), width: 4.0, border: Default::default() }, handle: iced::widget::slider::Handle { shape: iced::widget::slider::HandleShape::Rectangle { width: 10, border_radius: 2.0f32.into() }, background: iced::Background::Color(Color::from_rgb(0.4, 0.4, 0.4)), border_width: 0.0, border_color: Color::TRANSPARENT } })).width(Length::Fixed(12.0)).height(Length::Fill).padding(2)
                 ].into()
+            }
+            SessionKind::RemoteDisplay => {
+                if let Some(display) = &session.remote_display {
+                    if let Some(handle) = &display.handle {
+                        container(
+                            iced_image(handle.clone())
+                                .width(Length::Fill)
+                                .height(Length::Fill)
+                        )
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .into()
+                    } else {
+                        container(
+                            column![
+                                text("RDP session connected"),
+                                text("Waiting for first frame...").size(14),
+                            ]
+                            .spacing(10)
+                        )
+                        .center(Length::Fill)
+                        .into()
+                    }
+                } else {
+                    container(text("Remote display state is not initialized"))
+                        .center(Length::Fill)
+                        .into()
+                }
             }
         }
     } else { text("No active tab").into() };

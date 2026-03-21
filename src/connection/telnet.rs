@@ -120,6 +120,12 @@ pub fn connect_and_subscribe(
                                     (Some(state), host, port, tx_to_iced, tx_to_ssh, rx_from_ssh, rx_from_iced)
                                 ));
                             }
+                            Some(ConnectionInput::RdpInput(_)) => {
+                                return Some((
+                                    ConnectionEvent::Data(vec![]),
+                                    (Some(state), host, port, tx_to_iced, tx_to_ssh, rx_from_ssh, rx_from_iced)
+                                ));
+                            }
                             None => return None,
                         }
                     }
