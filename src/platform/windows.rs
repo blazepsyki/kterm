@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use tokio::sync::mpsc;
 use iced::futures::StreamExt;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize, MasterPty, Child};

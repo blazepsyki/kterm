@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use iced::widget::{button, column, container, row, scrollable, text, vertical_slider, Space, text_input, Id, mouse_area, stack};
 use iced::{Background, Color, Element, Length, Task, Subscription, event, keyboard, advanced::input_method, Font, font::Weight, mouse};
 use iced::widget::operation::focus;

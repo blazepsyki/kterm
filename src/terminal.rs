@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 use iced::{Color, Element, Length, Rectangle, Size, Theme};
 use iced::advanced::{
     input_method::{InputMethod, Purpose},
