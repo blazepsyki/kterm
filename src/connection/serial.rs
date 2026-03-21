@@ -106,6 +106,12 @@ pub fn connect_and_subscribe(
                                 (Some(write_port), port_name, baud_rate, tx_to_iced, tx_to_serial, rx_from_serial, rx_from_iced)
                             ));
                         }
+                        Some(ConnectionInput::RdpInput(_)) => {
+                            return Some((
+                                ConnectionEvent::Data(vec![]),
+                                (Some(write_port), port_name, baud_rate, tx_to_iced, tx_to_serial, rx_from_serial, rx_from_iced)
+                            ));
+                        }
                         None => {
                             // Session closed
                             return None;

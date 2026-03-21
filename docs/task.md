@@ -26,16 +26,21 @@
   - [x] RDP 접속 입력 폼(Host/Port/User/Password) 추가
   - [x] `src/connection/rdp.rs` 연결 스캐폴드 추가
   - [x] 세션 ID 기반 라우팅으로 `ConnectRdp` 연결
-  - [ ] IronRDP 핸드셰이크/그래픽 프레임 수신 구현
+  - [x] IronRDP 핸드셰이크/그래픽 프레임 수신 구현
     - [x] Connector + TLS upgrade + connect_finalize 통합 완료
-    - [ ] ActiveStage 프레임 디코드/렌더링 파이프라인 연동
+    - [x] ActiveStage 프레임 수신/응답 루프(프로브) 연동
+    - [x] ActiveStage 프레임 디코드 결과를 Iced 렌더링 파이프라인으로 연동(초기)
   - [x] 의존성 충돌 해소: `russh`를 `0.55.0`으로 낮춰 `ironrdp` 동시 의존성 활성화
-  - [ ] Iced 기반 원격 화면 렌더링 뷰 구현
-  - [ ] RDP/VNC 공용 Iced 렌더링 모듈(`remote_display`) 구축
-    - [ ] 공통 프레임 이벤트(`FrameUpdate`) 타입 정의
-    - [ ] 공통 프레임 버퍼 상태(`RemoteDisplayState`) 구현
+  - [x] Iced 기반 원격 화면 렌더링 뷰 구현(초기)
+  - [x] RDP/VNC 공용 Iced 렌더링 모듈(`remote_display`) 구축
+    - [x] 공통 프레임 이벤트(`FrameUpdate`) 타입 정의
+    - [x] 공통 프레임 버퍼 상태(`RemoteDisplayState`) 구현
     - [ ] 렌더 스로틀/드롭 정책 공통화
-  - [ ] 키보드/마우스 입력을 RDP 입력 이벤트로 매핑
+  - [x] RDP 프레임 이벤트를 탭 뷰 이미지 렌더링으로 연결(초기 버전)
+  - [x] 부분 업데이트(Rect) 이벤트 경로 추가
+  - [x] 키보드/마우스 입력을 RDP 입력 이벤트로 매핑(기본)
+    - [x] 기본 키보드 입력 매핑(FastPath scancode/unicode) 연동
+    - [x] 마우스 이동/클릭/휠 입력 매핑
   - [ ] 탭 종료/예외 상황 안정화 및 회귀 테스트
   - [ ] 상세 작업 문서: `docs/rdp_integration_plan.md`
 - [ ] 14단계: VNC 그래픽 연결 인터페이스 구현
@@ -48,4 +53,10 @@
   - [ ] 사이드바 아이콘 및 세션 관리 UI 고도화
   - [ ] 다크/라이트 테마 시스템 및 설정창 구현
   - [ ] UI/UX 커스터마이즈 기능 구현
-- [ ] 16단계: 최종 안정화 및 배포 준비
+- [ ] 16단계: 원격 프로토콜 품질 고도화 (후속 단계)
+  - [ ] 포커스/입력 캡처 정책 정교화 (원격 탭 활성 시에만 입력 전달)
+  - [ ] 키 조합(Ctrl/Alt/Shift/Win) 및 IME/로케일 입력 정밀 매핑
+  - [ ] 렌더 스로틀/드롭 정책 튜닝 및 성능 계측
+  - [ ] 탭 전환/종료/재연결 안정성 및 예외 처리 강화
+  - [ ] 네트워크 지연/패킷 손실 환경 회복력 테스트
+- [ ] 17단계: 최종 안정화 및 배포 준비
