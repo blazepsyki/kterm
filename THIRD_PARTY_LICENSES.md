@@ -42,6 +42,21 @@
 - known warning: unescaper 0.1.8 uses deprecated SPDX style `GPL-3.0/MIT`
 - impact: warning only, check exits with success
 
+## Font Assets
+
+### D2Coding.ttf
+
+- upstream: https://github.com/naver/d2codingfont
+- license: SIL Open Font License 1.1 (OFL-1.1)
+- local license text: assets/fonts/OFL-1.1.txt
+- local notice: assets/fonts/D2Coding-LICENSE-NOTICE.txt
+
+공식 근거:
+
+- D2Coding README의 라이선스 안내(OFL): https://github.com/naver/d2codingfont
+- D2Coding Open Font License 위키(저작권/Reserved Font Name 포함): https://github.com/naver/d2codingfont/wiki/Open-Font-License
+- OFL 1.1 공식 텍스트: https://openfontlicense.org/open-font-license-official-text/
+
 ## Regeneration
 
 아래 명령으로 직접 의존성 라이선스 표의 원본 데이터를 다시 생성할 수 있습니다.

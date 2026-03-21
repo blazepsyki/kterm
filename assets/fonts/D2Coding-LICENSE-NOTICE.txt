@@ -1,0 +1,22 @@
+D2Coding Font License Notice
+
+Font file:
+- D2Coding.ttf
+
+Upstream project:
+- https://github.com/naver/d2codingfont
+
+License:
+- SIL Open Font License, Version 1.1 (OFL-1.1)
+- Official text is included at: OFL-1.1.txt
+
+Copyright / Reserved Font Name notice
+(source: https://github.com/naver/d2codingfont/wiki/Open-Font-License):
+- Copyright (c) 2015, NAVER Corporation (http://www.navercorp.com/),
+  with Reserved Font Name D2Coding.
+- Copyright (c) 2015, NAVER Corporation (http://www.navercorp.com/),
+  with Reserved Font Name D2Coding-Bold.
+
+Redistribution note:
+- This repository redistributes D2Coding.ttf with its OFL-1.1 license text.
+- If you modify the font, review OFL Reserved Font Name conditions before renaming/distribution.

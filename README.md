@@ -145,3 +145,5 @@ assets/
 - 제3자 라이선스 목록: [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)
 - 릴리즈 점검 체크리스트: [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)
 - CI 라이선스 스캔: [.github/workflows/license-check.yml](.github/workflows/license-check.yml)
+- 폰트 라이선스 원문(OFL 1.1): [assets/fonts/OFL-1.1.txt](assets/fonts/OFL-1.1.txt)
+- D2Coding 폰트 고지: [assets/fonts/D2Coding-LICENSE-NOTICE.txt](assets/fonts/D2Coding-LICENSE-NOTICE.txt)
