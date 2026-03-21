@@ -28,10 +28,10 @@ pub fn connect_and_subscribe(
 
     futures::stream::unfold(
         initial_state,
-        |(mut state_opt, host, port, tx_to_iced, tx_to_ssh, mut rx_from_ssh, mut rx_from_iced)| async move {
+        |(mut state_opt, host, port, tx_to_iced, tx_to_ssh, rx_from_ssh, mut rx_from_iced)| async move {
             if state_opt.is_none() {
                 match TcpStream::connect((host.as_str(), port)).await {
-                    Ok(mut stream) => {
+                    Ok(stream) => {
                         let mut codec = TelnetCodec::new(8192);
                         codec.message_mode = false;
                         
