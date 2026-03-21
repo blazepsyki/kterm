@@ -32,7 +32,7 @@
    - **[SSH]**: Host, Port, Username, Password 입력.
    - **[Telnet]**: Host, Port 입력.
    - **[Serial]**: COM Port, Baud Rate 입력.
-   - **[Local]**: 단순한 "Launch PowerShell" 실행 버튼 및 설명글 안내.
+   - **[Local]**: 시스템에서 탐지한 셸(`pwsh`, `powershell`, `cmd`, `bash`)을 선택박스(Pick List)로 고른 뒤, 선택한 셸을 실행.
 3. **프리미엄 룩앤필(Look and Feel)**: Iced의 `Style`을 활용하여, 배경과 상하단 분리선, 입력창(`text_input`), 버튼(`button`)에 `Border::radius` 등 곡선을 부여하고 차분한 무채색 다크톤 테마로 빚어냅니다.
 
 ---

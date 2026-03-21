@@ -62,7 +62,7 @@ graph TD
 공통 인터페이스(`connection.rs`) 규격을 구현한 실제 백그라운드 파이프라인 모듈들입니다. UI 스레드 개입 없이 별개의 비동기 환경에서 작동합니다.
 - **SSH (`ssh.rs`)**: `russh` 클라이언트를 감싸고 무한 스레드를 구성하여 서버 데이터를 `ConnectionEvent::Data`로 우회 방출합니다.
 - **OS 플랫폼 추상화 (`platform/mod.rs`)**: 윈도우, 리눅스, 맥OS 등 각 운영체제별로 서로 다른 네이티브 기능들을 통합 호출하기 위해 마련된 래퍼(Wrapper) 껍데기 모듈입니다.
-  - **Local PTY (`windows.rs`)**: `platform/mod.rs` 하위에서 작동하며, 현재 윈도우 한정으로 `portable-pty`를 이용해 PowerShell 프로세스를 백그라운드 스폰하는 로컬 가상 터미널 엔진입니다.
+   - **Local PTY (`windows.rs`)**: `platform/mod.rs` 하위에서 작동하며, 현재 윈도우 한정으로 `portable-pty`를 이용해 사용자가 선택한 셸(`pwsh/powershell/cmd/bash`) 프로세스를 백그라운드 스폰하는 로컬 가상 터미널 엔진입니다.
 
 ### 4) 뇌(Brain)와 중추 신경: `main.rs` (Entry Point & UI Routing)
 - Iced Application(`State` 구조체)이 초기화됩니다. 
