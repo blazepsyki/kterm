@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use iced::widget::{button, column, container, row, scrollable, text, vertical_slider, Space, text_input, Id, mouse_area, stack};
+use iced::widget::{button, column, container, pick_list, row, scrollable, text, vertical_slider, Space, text_input, Id, mouse_area, stack};
 use iced::{Background, Color, Element, Length, Task, Subscription, event, keyboard, advanced::input_method, Font, font::Weight, mouse};
 use iced::widget::operation::focus;
 use iced::window;
+use std::collections::HashSet;
+use std::env;
+use std::path::Path;
 mod terminal;
 mod connection;
 mod platform;
@@ -52,7 +55,77 @@ pub enum ProtocolMode {
     Local,
 }
 
+#[derive(Debug, Clone)]
+struct LocalShellOption {
+    name: String,
+    program: String,
+    args: Vec<String>,
+}
+
+fn resolve_executable(exe_name: &str) -> Option<String> {
+    let candidate = Path::new(exe_name);
+    if candidate.is_absolute() && candidate.exists() {
+        return Some(exe_name.to_string());
+    }
+
+    if let Ok(path_var) = env::var("PATH") {
+        for dir in env::split_paths(&path_var) {
+            let full = dir.join(exe_name);
+            if full.exists() {
+                return Some(full.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+fn detect_local_shells() -> Vec<LocalShellOption> {
+    let mut shells = Vec::new();
+    let mut dedup = HashSet::new();
+
+    let mut push_shell = |name: &str, program: String, args: Vec<String>| {
+        let key = program.to_lowercase();
+        if dedup.insert(key) {
+            shells.push(LocalShellOption {
+                name: name.to_string(),
+                program,
+                args,
+            });
+        }
+    };
+
+    if let Ok(comspec) = env::var("COMSPEC") {
+        if Path::new(&comspec).exists() {
+            push_shell("Command Prompt (COMSPEC)", comspec, vec![]);
+        }
+    }
+
+    let candidates = [
+        ("PowerShell 7", "pwsh.exe", vec!["-NoLogo", "-NoExit"]),
+        ("Windows PowerShell", "powershell.exe", vec!["-NoLogo", "-NoExit"]),
+        ("Command Prompt", "cmd.exe", vec![]),
+        ("Bash", "bash.exe", vec!["--login", "-i"]),
+    ];
+
+    for (name, exe, args) in candidates {
+        if let Some(program) = resolve_executable(exe) {
+            push_shell(name, program, args.iter().map(|s| s.to_string()).collect());
+        }
+    }
+
+    if shells.is_empty() {
+        shells.push(LocalShellOption {
+            name: "Windows PowerShell (fallback)".to_string(),
+            program: "powershell.exe".to_string(),
+            args: vec!["-NoLogo".to_string(), "-NoExit".to_string()],
+        });
+    }
+
+    shells
+}
+
 struct Session {
+    id: u64,
     name: String,
     kind: SessionKind,
     terminal: TerminalEmulator,
@@ -60,8 +133,9 @@ struct Session {
 }
 
 impl Session {
-    fn welcome() -> Self {
+    fn welcome(id: u64) -> Self {
         Self {
+            id,
             name: "Welcome".to_string(),
             kind: SessionKind::Welcome,
             terminal: TerminalEmulator::new(24, 80),
@@ -69,8 +143,9 @@ impl Session {
         }
     }
 
-    fn new_terminal(name: String, rows: usize, cols: usize) -> Self {
+    fn new_terminal(id: u64, name: String, rows: usize, cols: usize) -> Self {
         Self {
+            id,
             name,
             kind: SessionKind::Terminal,
             terminal: TerminalEmulator::new(rows, cols),
@@ -83,6 +158,7 @@ impl Session {
 
 struct State {
     sessions: Vec<Session>,
+    next_session_id: u64,
     active_index: usize,
     welcome_protocol: ProtocolMode,
     ssh_host: String,
@@ -91,6 +167,8 @@ struct State {
     ssh_pass: String,
     serial_port: String,
     serial_baud: String,
+    local_shells: Vec<LocalShellOption>,
+    selected_local_shell: usize,
     id_host: Id,
     id_port: Id,
     id_user: Id,
@@ -103,8 +181,10 @@ struct State {
 
 impl Default for State {
     fn default() -> Self {
+        let local_shells = detect_local_shells();
         Self {
-            sessions: vec![Session::welcome()],
+            sessions: vec![Session::welcome(0)],
+            next_session_id: 1,
             active_index: 0,
             welcome_protocol: ProtocolMode::Ssh,
             ssh_host: "".to_string(),
@@ -113,6 +193,8 @@ impl Default for State {
             ssh_pass: "".to_string(),
             serial_port: "COM1".to_string(),
             serial_baud: "115200".to_string(),
+            local_shells,
+            selected_local_shell: 0,
             id_host: Id::new("host"),
             id_port: Id::new("port"),
             id_user: Id::new("user"),
@@ -136,7 +218,7 @@ pub enum Message {
     ImePreedit(String),
     ImeCommit(String),
     FontLoaded(Result<(), iced::font::Error>),
-    ConnectionMessage(usize, connection::ConnectionEvent),
+    ConnectionMessage(u64, connection::ConnectionEvent),
     TerminalResize(usize, usize),
     TerminalScroll(f32),
     TerminalScrollTo(usize),
@@ -147,6 +229,7 @@ pub enum Message {
     SerialPortChanged(String),
     SerialBaudChanged(String),
     SelectProtocol(ProtocolMode),
+    SelectLocalShell(usize),
     ConnectSsh,
     ConnectTelnet,
     ConnectLocal,
@@ -186,7 +269,9 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::NewSshTab => {
-            state.sessions.push(Session::welcome());
+            let id = state.next_session_id;
+            state.next_session_id += 1;
+            state.sessions.push(Session::welcome(id));
             state.active_index = state.sessions.len() - 1;
             Task::none()
         }
@@ -214,8 +299,10 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::FontLoaded(_) => Task::none(),
-        Message::ConnectionMessage(target_index, event) => {
-            if let Some(session) = state.sessions.get_mut(target_index) {
+        Message::ConnectionMessage(target_id, event) => {
+            let maybe_index = state.sessions.iter().position(|s| s.id == target_id);
+            if let Some(target_index) = maybe_index {
+                let session = &mut state.sessions[target_index];
                 match event {
                     connection::ConnectionEvent::Connected(sender) => {
                         session.sender = Some(sender.clone());
@@ -278,6 +365,12 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::SerialPortChanged(s) => { state.serial_port = s; Task::none() }
         Message::SerialBaudChanged(s) => { state.serial_baud = s; Task::none() }
         Message::SelectProtocol(mode) => { state.welcome_protocol = mode; Task::none() }
+        Message::SelectLocalShell(index) => {
+            if index < state.local_shells.len() {
+                state.selected_local_shell = index;
+            }
+            Task::none()
+        }
         Message::ConnectSsh => {
             let host = state.ssh_host.clone();
             let port: u16 = state.ssh_port.parse().unwrap_or(22);
@@ -285,38 +378,72 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             let pass = state.ssh_pass.clone();
             let name = format!("SSH: {}@{}", user, host);
             let target_index = state.active_index;
+            let mut target_id = None;
             if let Some(session) = state.sessions.get_mut(target_index) {
-                *session = Session::new_terminal(name, session.terminal.rows, session.terminal.cols);
+                target_id = Some(session.id);
+                *session = Session::new_terminal(session.id, name, session.terminal.rows, session.terminal.cols);
             }
-            Task::run(connection::ssh::connect_and_subscribe(host, port, user, pass), move |event| Message::ConnectionMessage(target_index, event))
+            if let Some(target_id) = target_id {
+                Task::run(connection::ssh::connect_and_subscribe(host, port, user, pass), move |event| Message::ConnectionMessage(target_id, event))
+            } else {
+                Task::none()
+            }
         }
         Message::ConnectTelnet => {
             let host = state.ssh_host.clone();
             let port: u16 = state.ssh_port.parse().unwrap_or(23); // Telnet default
             let name = format!("Telnet: {}:{}", host, port);
             let target_index = state.active_index;
+            let mut target_id = None;
             if let Some(session) = state.sessions.get_mut(target_index) {
-                *session = Session::new_terminal(name, session.terminal.rows, session.terminal.cols);
+                target_id = Some(session.id);
+                *session = Session::new_terminal(session.id, name, session.terminal.rows, session.terminal.cols);
             }
-            Task::run(connection::telnet::connect_and_subscribe(host, port), move |event| Message::ConnectionMessage(target_index, event))
+            if let Some(target_id) = target_id {
+                Task::run(connection::telnet::connect_and_subscribe(host, port), move |event| Message::ConnectionMessage(target_id, event))
+            } else {
+                Task::none()
+            }
         }
         Message::ConnectSerial => {
             let port_name = state.serial_port.clone();
             let baud: u32 = state.serial_baud.parse().unwrap_or(115200);
             let name = format!("Serial: {} ({}bps)", port_name, baud);
             let target_index = state.active_index;
+            let mut target_id = None;
             if let Some(session) = state.sessions.get_mut(target_index) {
-                *session = Session::new_terminal(name, session.terminal.rows, session.terminal.cols);
+                target_id = Some(session.id);
+                *session = Session::new_terminal(session.id, name, session.terminal.rows, session.terminal.cols);
             }
-            Task::run(connection::serial::connect_and_subscribe(port_name, baud), move |event| Message::ConnectionMessage(target_index, event))
+            if let Some(target_id) = target_id {
+                Task::run(connection::serial::connect_and_subscribe(port_name, baud), move |event| Message::ConnectionMessage(target_id, event))
+            } else {
+                Task::none()
+            }
         }
         Message::ConnectLocal => {
-            let name = "Local: PowerShell".to_string();
+            let shell = state
+                .local_shells
+                .get(state.selected_local_shell)
+                .cloned()
+                .unwrap_or(LocalShellOption {
+                    name: "Windows PowerShell".to_string(),
+                    program: "powershell.exe".to_string(),
+                    args: vec!["-NoLogo".to_string(), "-NoExit".to_string()],
+                });
+
+            let name = format!("Local: {}", shell.name);
             let target_index = state.active_index;
+            let mut target_id = None;
             if let Some(session) = state.sessions.get_mut(target_index) {
-                *session = Session::new_terminal(name, session.terminal.rows, session.terminal.cols);
+                target_id = Some(session.id);
+                *session = Session::new_terminal(session.id, name, session.terminal.rows, session.terminal.cols);
             }
-            Task::run(platform::windows::spawn_local_shell(), move |event| Message::ConnectionMessage(target_index, event))
+            if let Some(target_id) = target_id {
+                Task::run(platform::windows::spawn_local_shell(shell.program, shell.args), move |event| Message::ConnectionMessage(target_id, event))
+            } else {
+                Task::none()
+            }
         }
 
         Message::SelectionStart(col, row) => {
@@ -542,12 +669,18 @@ fn view(state: &State) -> Element<'_, Message> {
     let mut tab_bar = row![].spacing(0).padding(0);
     for (i, session) in state.sessions.iter().enumerate() {
         let is_active = i == state.active_index;
+        let tab_height = 30.0;
         let tab_bg = if is_active { Color::from_rgb(0.08, 0.08, 0.08) } else { Color::from_rgb(0.12, 0.12, 0.12) };
         let border_color = if is_active { Color::from_rgb(0.35, 0.35, 0.35) } else { Color::from_rgb(0.22, 0.22, 0.22) };
 
         // 내부 버튼은 완전 투명 → 부모 컨테이너가 배경/외곽선 일괄 담당
-        let label_btn = button(text(session.name.clone()).size(12))
-            .padding([6, 12])
+        let label_btn = button(
+            container(text(session.name.clone()).size(12))
+                .height(Length::Fill)
+                .center_y(Length::Fill)
+        )
+            .height(Length::Fixed(tab_height))
+            .padding([0, 12])
             .style(move |_t, _s| {
                 button::Style {
                     background: Some(Background::Color(Color::TRANSPARENT)),
@@ -557,8 +690,16 @@ fn view(state: &State) -> Element<'_, Message> {
             }).on_press(Message::TabSelected(i));
 
         let tab_item: Element<'_, Message> = if state.sessions.len() > 1 {
-            let close_btn = button(text("✕").size(10))
-                .padding([6, 8])
+            let close_btn = button(
+                container(text("×").size(13))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+            )
+                .width(Length::Fixed(24.0))
+                .height(Length::Fixed(tab_height))
+                .padding(0)
                 .style(move |_t, s| {
                     button::Style {
                         background: Some(Background::Color(Color::TRANSPARENT)),
@@ -567,7 +708,7 @@ fn view(state: &State) -> Element<'_, Message> {
                     }
                 }).on_press(Message::CloseTab(i));
 
-            container(row![label_btn, close_btn].align_y(iced::Alignment::Center))
+            container(row![label_btn, close_btn].height(Length::Fixed(tab_height)).align_y(iced::Alignment::Center))
                 .style(move |_| container::Style {
                     background: Some(Background::Color(tab_bg)),
                     border: iced::Border { radius: iced::border::Radius { top_left: 6.0, top_right: 6.0, ..Default::default() }, width: 1.0, color: border_color },
@@ -654,9 +795,24 @@ fn view(state: &State) -> Element<'_, Message> {
                     ProtocolMode::Local => column![
                         text("Local System").size(20).font(Font { weight: Weight::Bold, ..Default::default() }),
                         hr(),
-                        text("Launch a local PowerShell terminal session directly within kterm.").size(14),
+                        text("Detected shells on this system").size(14),
+                        {
+                            let options: Vec<String> = state.local_shells.iter().map(|s| s.name.clone()).collect();
+                            let selected = state.local_shells.get(state.selected_local_shell).map(|s| s.name.clone());
+
+                            pick_list(options, selected, |name| {
+                                let index = state
+                                    .local_shells
+                                    .iter()
+                                    .position(|s| s.name == name)
+                                    .unwrap_or(0);
+                                Message::SelectLocalShell(index)
+                            })
+                            .width(Length::Fill)
+                            .padding([8, 12])
+                        },
                         Space::new().height(Length::Fixed(10.0)),
-                        button(container(text("Launch PowerShell")).center_x(Length::Fill).center_y(Length::Fill)).padding(12).width(Length::Fill).style(button::primary).on_press(Message::ConnectLocal)
+                        button(container(text("Launch Selected Shell")).center_x(Length::Fill).center_y(Length::Fill)).padding(12).width(Length::Fill).style(button::primary).on_press(Message::ConnectLocal)
                     ].spacing(15).into(),
                 };
 
