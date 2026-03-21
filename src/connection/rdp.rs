@@ -19,6 +19,7 @@ use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{ActiveStage, ActiveStageOutput};
 use sspi::network_client::reqwest_network_client::ReqwestNetworkClient;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio_rustls::rustls;
 use x509_cert::der::Decode as _;
 
@@ -137,40 +138,50 @@ fn run_rdp_worker_inner(
     let _ = tx_from_worker.send(ConnectionEvent::Data(summary.into_bytes()));
 
     loop {
-        while let Ok(input) = rx_from_iced.try_recv() {
-            match input {
-                ConnectionInput::Resize { cols, rows } => {
-                    let pixel_w = u32::from(cols).saturating_mul(16).max(200).min(8192);
-                    let pixel_h = u32::from(rows).saturating_mul(16).max(200).min(8192);
-                    if let Some(encoded) = active_stage.encode_resize(pixel_w, pixel_h, None, None) {
-                        if let Ok(buf) = encoded {
-                            let _ = framed.write_all(&buf);
+        loop {
+            match rx_from_iced.try_recv() {
+                Ok(input) => match input {
+                    ConnectionInput::Resize { cols, rows } => {
+                        let pixel_w = u32::from(cols).saturating_mul(16).max(200).min(8192);
+                        let pixel_h = u32::from(rows).saturating_mul(16).max(200).min(8192);
+                        if let Some(encoded) = active_stage.encode_resize(pixel_w, pixel_h, None, None) {
+                            if let Ok(buf) = encoded {
+                                let _ = framed.write_all(&buf);
+                            }
                         }
                     }
-                }
-                ConnectionInput::Data(_) => {
-                    // Keyboard/mouse input mapping is implemented in next step.
-                }
-                ConnectionInput::RdpInput(input) => {
-                    let events = rdp_input_to_fastpath(input, &mut cursor_x, &mut cursor_y);
-                    if !events.is_empty() {
-                        if let Ok(outputs) = active_stage.process_fastpath_input(&mut image, &events) {
-                            for out in outputs {
-                                match out {
-                                    ActiveStageOutput::ResponseFrame(frame) => {
-                                        let _ = framed.write_all(&frame);
+                    ConnectionInput::Data(_) => {
+                        // Keyboard/mouse input mapping is implemented in next step.
+                    }
+                    ConnectionInput::RdpInput(input) => {
+                        let events = rdp_input_to_fastpath(input, &mut cursor_x, &mut cursor_y);
+                        if !events.is_empty() {
+                            if let Ok(outputs) = active_stage.process_fastpath_input(&mut image, &events) {
+                                for out in outputs {
+                                    match out {
+                                        ActiveStageOutput::ResponseFrame(frame) => {
+                                            let _ = framed.write_all(&frame);
+                                        }
+                                        ActiveStageOutput::GraphicsUpdate(rect) => {
+                                            pending_rect = Some(match pending_rect {
+                                                Some(prev) => merge_rect(prev, rect),
+                                                None => rect,
+                                            });
+                                        }
+                                        _ => {}
                                     }
-                                    ActiveStageOutput::GraphicsUpdate(rect) => {
-                                        pending_rect = Some(match pending_rect {
-                                            Some(prev) => merge_rect(prev, rect),
-                                            None => rect,
-                                        });
-                                    }
-                                    _ => {}
                                 }
                             }
                         }
                     }
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    let _ = tx_from_worker.send(ConnectionEvent::Data(
+                        b"\r\n[RDP] input channel closed; stopping RDP worker.\r\n".to_vec(),
+                    ));
+                    let _ = tx_from_worker.send(ConnectionEvent::Disconnected);
+                    return Ok(());
                 }
             }
         }

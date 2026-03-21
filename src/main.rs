@@ -428,7 +428,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             let mut target_id = None;
             if let Some(session) = state.sessions.get_mut(target_index) {
                 target_id = Some(session.id);
-                *session = Session::new_remote_display(session.id, name, 1280, 1024);
+                *session = Session::new_terminal(session.id, name, session.terminal.rows, session.terminal.cols);
             }
             if let Some(target_id) = target_id {
                 Task::run(connection::ssh::connect_and_subscribe(host, port, user, pass), move |event| Message::ConnectionMessage(target_id, event))
@@ -503,7 +503,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             let mut target_id = None;
             if let Some(session) = state.sessions.get_mut(target_index) {
                 target_id = Some(session.id);
-                *session = Session::new_terminal(session.id, name, session.terminal.rows, session.terminal.cols);
+                *session = Session::new_remote_display(session.id, name, 1280, 1024);
             }
 
             if let Some(target_id) = target_id {
