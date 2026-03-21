@@ -24,7 +24,27 @@
   - [ ] 탭 순서 변경(Drag & Drop) 기능
   - [ ] 사이드바 아이콘 및 세션 관리 UI 고도화
   - [ ] 다크/라이트 테마 시스템 및 설정창 구현
+  - [ ] UI/UX 커스터마이즈 기능 구현
 - [ ] 12단계: Telnet 및 Serial 포트 실물 기기/네트워크 연동 테스트 및 파생 버그 수정 (보류된 작업)
-- [ ] 13단계: RDP 그래픽 연결 인터페이스 구현
+- [ ] 13단계: RDP 그래픽 연결 인터페이스 구현 (진행 중)
+  - [x] Welcome 페이지에 RDP 프로토콜 탭 추가
+  - [x] RDP 접속 입력 폼(Host/Port/User/Password) 추가
+  - [x] `src/connection/rdp.rs` 연결 스캐폴드 추가
+  - [x] 세션 ID 기반 라우팅으로 `ConnectRdp` 연결
+  - [ ] IronRDP 핸드셰이크/그래픽 프레임 수신 구현
+    - [x] Connector + TLS upgrade + connect_finalize 통합 완료
+    - [ ] ActiveStage 프레임 디코드/렌더링 파이프라인 연동
+  - [x] 의존성 충돌 해소: `russh`를 `0.55.0`으로 낮춰 `ironrdp` 동시 의존성 활성화
+  - [ ] Iced 기반 원격 화면 렌더링 뷰 구현
+  - [ ] RDP/VNC 공용 Iced 렌더링 모듈(`remote_display`) 구축
+    - [ ] 공통 프레임 이벤트(`FrameUpdate`) 타입 정의
+    - [ ] 공통 프레임 버퍼 상태(`RemoteDisplayState`) 구현
+    - [ ] 렌더 스로틀/드롭 정책 공통화
+  - [ ] 키보드/마우스 입력을 RDP 입력 이벤트로 매핑
+  - [ ] 탭 종료/예외 상황 안정화 및 회귀 테스트
+  - [ ] 상세 작업 문서: `docs/rdp_integration_plan.md`
 - [ ] 14단계: VNC 그래픽 연결 인터페이스 구현
+  - [ ] `src/connection/vnc.rs` 구현
+  - [ ] 공용 `remote_display` 모듈에 VNC 프레임 연결
+  - [ ] VNC 입력 이벤트(키보드/마우스) 연결
 - [ ] 15단계: 최종 안정화 및 배포 준비

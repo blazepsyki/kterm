@@ -4,6 +4,7 @@
 pub mod ssh;
 pub mod telnet;
 pub mod serial;
+pub mod rdp;
 
 use tokio::sync::mpsc;
 

@@ -53,6 +53,7 @@ pub enum ProtocolMode {
     Telnet,
     Serial,
     Local,
+    Rdp,
 }
 
 #[derive(Debug, Clone)]
@@ -167,6 +168,10 @@ struct State {
     ssh_pass: String,
     serial_port: String,
     serial_baud: String,
+    rdp_host: String,
+    rdp_port: String,
+    rdp_user: String,
+    rdp_pass: String,
     local_shells: Vec<LocalShellOption>,
     selected_local_shell: usize,
     id_host: Id,
@@ -193,6 +198,10 @@ impl Default for State {
             ssh_pass: "".to_string(),
             serial_port: "COM1".to_string(),
             serial_baud: "115200".to_string(),
+            rdp_host: "".to_string(),
+            rdp_port: "3389".to_string(),
+            rdp_user: "".to_string(),
+            rdp_pass: "".to_string(),
             local_shells,
             selected_local_shell: 0,
             id_host: Id::new("host"),
@@ -228,12 +237,17 @@ pub enum Message {
     PassChanged(String),
     SerialPortChanged(String),
     SerialBaudChanged(String),
+    RdpHostChanged(String),
+    RdpPortChanged(String),
+    RdpUserChanged(String),
+    RdpPassChanged(String),
     SelectProtocol(ProtocolMode),
     SelectLocalShell(usize),
     ConnectSsh,
     ConnectTelnet,
     ConnectLocal,
     ConnectSerial,
+    ConnectRdp,
     TabPressed(bool),
     FieldFocused(usize),
     WindowIdCaptured(window::Id),
@@ -244,6 +258,9 @@ pub enum Message {
     MaximizeWindow,
     CloseWindow,
     ToggleMenu(&'static str),
+    CloseMenuDeferred,
+    CloseMenu,
+    OpenProtocolTab(ProtocolMode),
     SelectionStart(usize, usize),
     SelectionUpdate(usize, usize),
     CopyText(String),
@@ -364,6 +381,10 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::PassChanged(s) => { state.ssh_pass = s; Task::none() }
         Message::SerialPortChanged(s) => { state.serial_port = s; Task::none() }
         Message::SerialBaudChanged(s) => { state.serial_baud = s; Task::none() }
+        Message::RdpHostChanged(s) => { state.rdp_host = s; Task::none() }
+        Message::RdpPortChanged(s) => { state.rdp_port = s; Task::none() }
+        Message::RdpUserChanged(s) => { state.rdp_user = s; Task::none() }
+        Message::RdpPassChanged(s) => { state.rdp_pass = s; Task::none() }
         Message::SelectProtocol(mode) => { state.welcome_protocol = mode; Task::none() }
         Message::SelectLocalShell(index) => {
             if index < state.local_shells.len() {
@@ -441,6 +462,29 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             if let Some(target_id) = target_id {
                 Task::run(platform::windows::spawn_local_shell(shell.program, shell.args), move |event| Message::ConnectionMessage(target_id, event))
+            } else {
+                Task::none()
+            }
+        }
+        Message::ConnectRdp => {
+            let host = state.rdp_host.clone();
+            let port: u16 = state.rdp_port.parse().unwrap_or(3389);
+            let user = state.rdp_user.clone();
+            let pass = state.rdp_pass.clone();
+            let name = format!("RDP: {}@{}:{}", user, host, port);
+
+            let target_index = state.active_index;
+            let mut target_id = None;
+            if let Some(session) = state.sessions.get_mut(target_index) {
+                target_id = Some(session.id);
+                *session = Session::new_terminal(session.id, name, session.terminal.rows, session.terminal.cols);
+            }
+
+            if let Some(target_id) = target_id {
+                Task::run(
+                    connection::rdp::connect_and_subscribe(host, port, user, pass),
+                    move |event| Message::ConnectionMessage(target_id, event),
+                )
             } else {
                 Task::none()
             }
@@ -547,7 +591,32 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::MinimizeWindow => { if let Some(id) = state.window_id { window::minimize(id, true) } else { Task::none() } }
         Message::MaximizeWindow => { if let Some(id) = state.window_id { window::toggle_maximize(id) } else { Task::none() } }
         Message::CloseWindow => { if let Some(id) = state.window_id { window::close(id) } else { Task::none() } }
-        Message::ToggleMenu(menu) => { if state.dummy_menu_open == Some(menu) { state.dummy_menu_open = None; } else { state.dummy_menu_open = Some(menu); } Task::none() }
+        Message::ToggleMenu(menu) => {
+            if menu.is_empty() {
+                state.dummy_menu_open = None;
+            } else if state.dummy_menu_open == Some(menu) {
+                state.dummy_menu_open = None;
+            } else {
+                state.dummy_menu_open = Some(menu);
+            }
+            Task::none()
+        }
+        Message::CloseMenuDeferred => {
+            Task::perform(async {}, |_| Message::CloseMenu)
+        }
+        Message::CloseMenu => {
+            state.dummy_menu_open = None;
+            Task::none()
+        }
+        Message::OpenProtocolTab(mode) => {
+            let id = state.next_session_id;
+            state.next_session_id += 1;
+            state.sessions.push(Session::welcome(id));
+            state.active_index = state.sessions.len() - 1;
+            state.welcome_protocol = mode;
+            state.dummy_menu_open = None;
+            Task::none()
+        }
     }
 }
 
@@ -572,8 +641,19 @@ fn subscription(state: &State) -> Subscription<Message> {
         }
     });
 
+    let menu_close_sub = if matches!(state.dummy_menu_open, Some(menu) if !menu.is_empty()) {
+        event::listen_with(|event, _status, _window| {
+            match event {
+                iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => Some(Message::CloseMenuDeferred),
+                _ => None,
+            }
+        })
+    } else {
+        Subscription::none()
+    };
+
     if is_welcome {
-        let mut subs = vec![tab_sub, mouse_sub];
+        let mut subs = vec![tab_sub, mouse_sub, menu_close_sub];
         if state.window_id.is_none() { subs.push(window::open_events().map(Message::WindowIdCaptured)); }
         Subscription::batch(subs)
     } else {
@@ -625,7 +705,7 @@ fn subscription(state: &State) -> Subscription<Message> {
                 _ => None
             }
         });
-        let mut subs = vec![term_sub, mouse_sub];
+        let mut subs = vec![term_sub, mouse_sub, menu_close_sub];
         if state.window_id.is_none() { subs.push(window::open_events().map(Message::WindowIdCaptured)); }
         Subscription::batch(subs)
     }
@@ -653,7 +733,7 @@ fn view(state: &State) -> Element<'_, Message> {
             container(text(" ◈ kterm").size(14).font(Font { weight: Weight::Bold, ..Default::default() })).padding([0, 15]).center_y(Length::Fill),
             menu_bar,
             mouse_area(container(text(active_session_name).size(12)).width(Length::Fill).center_x(Length::Fill).center_y(Length::Fill))
-                .on_press(Message::WindowDrag).on_release(Message::ToggleMenu("")),
+                .on_press(Message::WindowDrag).on_release(Message::CloseMenu),
             row![
                 button(container(text("—").size(12)).center_x(Length::Fill).center_y(Length::Fill)).width(Length::Fixed(46.0)).height(Length::Fill).style(button::text).on_press(Message::MinimizeWindow),
                 button(container(text("▢").size(14)).center_x(Length::Fill).center_y(Length::Fill)).width(Length::Fixed(46.0)).height(Length::Fill).style(button::text).on_press(Message::MaximizeWindow),
@@ -763,6 +843,7 @@ fn view(state: &State) -> Element<'_, Message> {
                     protocol_btn(ProtocolMode::Telnet, "Telnet", &state.welcome_protocol),
                     protocol_btn(ProtocolMode::Serial, "Serial", &state.welcome_protocol),
                     protocol_btn(ProtocolMode::Local, "Local Shell", &state.welcome_protocol),
+                    protocol_btn(ProtocolMode::Rdp, "RDP", &state.welcome_protocol),
                 ].spacing(10);
 
                 let form_content: Element<'_, Message> = match state.welcome_protocol {
@@ -813,6 +894,16 @@ fn view(state: &State) -> Element<'_, Message> {
                         },
                         Space::new().height(Length::Fixed(10.0)),
                         button(container(text("Launch Selected Shell")).center_x(Length::Fill).center_y(Length::Fill)).padding(12).width(Length::Fill).style(button::primary).on_press(Message::ConnectLocal)
+                    ].spacing(15).into(),
+                    ProtocolMode::Rdp => column![
+                        text("RDP Connection").size(20).font(Font { weight: Weight::Bold, ..Default::default() }),
+                        hr(),
+                        row![text("Host: ").width(100), text_input("IP Address", &state.rdp_host).on_input(Message::RdpHostChanged).width(300)],
+                        row![text("Port: ").width(100), text_input("3389", &state.rdp_port).on_input(Message::RdpPortChanged).width(150)],
+                        row![text("Username: ").width(100), text_input("user", &state.rdp_user).on_input(Message::RdpUserChanged).width(300)],
+                        row![text("Password: ").width(100), text_input("pass", &state.rdp_pass).on_input(Message::RdpPassChanged).secure(true).width(300).on_submit(Message::ConnectRdp)],
+                        Space::new().height(Length::Fixed(10.0)),
+                        button(container(text("Connect")).center_x(Length::Fill).center_y(Length::Fill)).padding(12).width(Length::Fill).style(button::primary).on_press(Message::ConnectRdp)
                     ].spacing(15).into(),
                 };
 
@@ -899,18 +990,35 @@ fn view(state: &State) -> Element<'_, Message> {
         content_with_resize.into()
     };
 
-    let final_layout: Element<'_, Message> = if let Some(menu) = state.dummy_menu_open {
+    let overlay_layer: Element<'_, Message> = if let Some(menu) = state.dummy_menu_open {
         if !menu.is_empty() {
             let dropdown = match menu {
-                "Session" => container(column![button(text("New SSH Session").size(12)).width(Length::Fill).style(button::text).on_press(Message::NewSshTab), button(text("New Local Session").size(12)).width(Length::Fill).style(button::text).on_press(Message::ConnectLocal), hr(), button(text("Close Current Tab").size(12)).width(Length::Fill).style(button::text).on_press(Message::CloseTab(state.active_index))].spacing(2).width(Length::Fixed(160.0))),
+                "Session" => container(
+                    column![
+                        button(text("New SSH Session").size(12)).width(Length::Fill).style(button::text).on_press(Message::OpenProtocolTab(ProtocolMode::Ssh)),
+                        button(text("New Telnet Session").size(12)).width(Length::Fill).style(button::text).on_press(Message::OpenProtocolTab(ProtocolMode::Telnet)),
+                        button(text("New Serial Session").size(12)).width(Length::Fill).style(button::text).on_press(Message::OpenProtocolTab(ProtocolMode::Serial)),
+                        button(text("New Local Session").size(12)).width(Length::Fill).style(button::text).on_press(Message::OpenProtocolTab(ProtocolMode::Local)),
+                        button(text("New RDP Session").size(12)).width(Length::Fill).style(button::text).on_press(Message::OpenProtocolTab(ProtocolMode::Rdp)),
+                        hr(),
+                        button(text("Close Current Tab").size(12)).width(Length::Fill).style(button::text).on_press(Message::CloseTab(state.active_index))
+                    ]
+                    .spacing(2)
+                    .width(Length::Fixed(180.0))
+                ),
                 "Settings" => container(column![button(text("App Settings").size(12)).width(Length::Fill).style(button::text), button(text("Terminal Theme").size(12)).width(Length::Fill).style(button::text), button(text("Font Settings").size(12)).width(Length::Fill).style(button::text)].spacing(2).width(Length::Fixed(160.0))),
                 _ => container(column![button(text(format!("{} Option 1", menu)).size(12)).width(Length::Fill).style(button::text), button(text(format!("{} Option 2", menu)).size(12)).width(Length::Fill).style(button::text)].spacing(2).width(Length::Fixed(160.0))),
             }.padding(4).style(|_| container::Style { background: Some(Background::Color(Color::from_rgb(0.18, 0.18, 0.18))), border: iced::Border { width: 1.0, color: Color::from_rgb(0.3, 0.3, 0.3), radius: 4.0f32.into() }, ..Default::default() });
             let h_offset: f32 = match menu { "Session" => 95.0, "Settings" => 95.0 + 72.0, "View" => 95.0 + 72.0 * 2.0, "Help" => 95.0 + 72.0 * 3.0, _ => 95.0 };
-            let overlay_layer: Element<'_, Message> = column![Space::new().height(Length::Fixed(35.0)), row![Space::new().width(Length::Fixed(h_offset)), dropdown]].into();
-            stack![final_content, overlay_layer].into()
-        } else { final_content }
-    } else { final_content };
+            column![Space::new().height(Length::Fixed(35.0)), row![Space::new().width(Length::Fixed(h_offset)), dropdown]].into()
+        } else {
+            container(Space::new().width(Length::Shrink).height(Length::Shrink)).into()
+        }
+    } else {
+        container(Space::new().width(Length::Shrink).height(Length::Shrink)).into()
+    };
+
+    let final_layout: Element<'_, Message> = stack![final_content, overlay_layer].into();
 
     container(final_layout).width(Length::Fill).height(Length::Fill).style(|_| container::Style { background: Some(Background::Color(Color::from_rgb(0.08, 0.08, 0.08))), text_color: Some(Color::WHITE), ..Default::default() }).into()
 }
