@@ -1,4 +1,6 @@
-# KTerm 고급 UI/UX 고도화 계획 (11단계)
+# KTerm 고급 UI/UX 고도화 계획 (11단계) — ✅ 완료
+
+> **구현 완료**: Welcome Page(프로토콜 선택 버튼 바 + 컨텍스트 기반 입력 폼)와 Tab Bar 디자인 고도화가 `src/main.rs`에 모두 반영되었습니다. RDP 프로토콜도 선택기에 포함되어 있습니다.
 
 기능적 기반이 완성된 KTerm의 첫인상을 획기적으로 개선하고 사용자의 작업 효율을 넓히기 위해, 메인 화면(Welcome Page)과 멀티 탭 바(Tab Bar)를 상업용 소프트웨어 수준(MobaXterm 등)으로 디자인을 리팩토링합니다.
 
@@ -6,7 +8,7 @@
 
 ## 1. 개요 및 주요 목표 (Objectives)
 
-- **Welcome Page 대규모 개편**: 통신 방식(SSH, Telnet, Serial, Local)이 늘어남에 따라 일렬로 나열되어 조잡해 보였던 메인 화면을 **카드 형태의 그리드/분할 레이아웃**으로 재배치합니다.
+- **Welcome Page 대규모 개편**: 통신 방식(SSH, Telnet, Serial, Local, RDP)이 늘어남에 따라 일렬로 나열되어 조잡해 보였던 메인 화면을 **카드 형태의 그리드/분할 레이아웃**으로 재배치합니다.
 - **멀티 탭 디자인 고도화**: 상단의 탭 목록 바를 VS Code나 알티탭(Alacritty/Windows Terminal)과 같이 세련되고 모던한 분위기로 다듬으며 마우스 오버(Hover) 효과 및 시각적 위계를 개선합니다.
 
 ---
@@ -25,7 +27,7 @@
 ### 2-2. 진행 2: Welcome Page(시작 접속 폼) 전면 개편
 `SessionKind::Welcome`의 뷰 렌더링 영역을 리빌드합니다. MobaXterm의 세션 생성 화면 구성을 차용하여 직관적인 UX를 제공합니다.
 1. **상단: 프로토콜 선택 버튼 바 (Protocol Selector)**:
-   - 가로형 아이콘/텍스트 기반의 큼직한 버튼(SSH, Telnet, Serial, Local 등)들을 상단에 나열하여 사용자가 원하는 프로토콜을 한눈에 누를 수 있도록 배치.
+   - 가로형 아이콘/텍스트 기반의 큼직한 버튼(SSH, Telnet, Serial, Local, **RDP** 등)들을 상단에 나열하여 사용자가 원하는 프로토콜을 한눈에 누를 수 있도록 배치.
    - 현재 선택된 프로토콜 버튼은 눈에 띄게 하이라이트(Highlight) 처리됨.
 2. **하단: 컨텍스트 기반 상세 입력 폼 (Contextual Form)**:
    - 선택된 프로토콜에 따라 하단 서브 창(Sub-pane)의 내용이 즉각적으로 변환(Switch)됨.
@@ -33,6 +35,7 @@
    - **[Telnet]**: Host, Port 입력.
    - **[Serial]**: COM Port, Baud Rate 입력.
    - **[Local]**: 시스템에서 탐지한 셸(`pwsh`, `powershell`, `cmd`, `bash`)을 선택박스(Pick List)로 고른 뒤, 선택한 셸을 실행.
+   - **[RDP]**: Host, Port, Username, Password 입력.
 3. **프리미엄 룩앤필(Look and Feel)**: Iced의 `Style`을 활용하여, 배경과 상하단 분리선, 입력창(`text_input`), 버튼(`button`)에 `Border::radius` 등 곡선을 부여하고 차분한 무채색 다크톤 테마로 빚어냅니다.
 
 ---
