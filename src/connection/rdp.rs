@@ -27,6 +27,9 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio_rustls::rustls;
 use x509_cert::der::Decode as _;
 
+use ironrdp_rdpsnd::client::Rdpsnd;
+use ironrdp_rdpsnd_native::cpal::RdpsndBackend;
+
 use crate::connection::{ConnectionEvent, ConnectionInput, RdpInput, RdpMouseButton};
 use crate::remote_display::FrameUpdate;
 
@@ -605,7 +608,8 @@ fn connect(
         .map_err(|e| format!("local_addr failed: {}", e))?;
 
     let mut framed = ironrdp_blocking::Framed::new(tcp_stream);
-    let mut connector = connector::ClientConnector::new(config, client_addr);
+    let mut connector = connector::ClientConnector::new(config, client_addr)
+        .with_static_channel(Rdpsnd::new(Box::new(RdpsndBackend::new())));
 
     let should_upgrade = ironrdp_blocking::connect_begin(&mut framed, &mut connector)
         .map_err(|e| format!("connect_begin failed: {}", e))?;
@@ -694,7 +698,7 @@ fn build_config(username: String, password: String, domain: Option<String>) -> c
         enable_server_pointer: false,
         request_data: None,
         autologon: false,
-        enable_audio_playback: false,
+        enable_audio_playback: true,
         pointer_software_rendering: true,
         performance_flags: PerformanceFlags::ENABLE_FONT_SMOOTHING
             | PerformanceFlags::ENABLE_DESKTOP_COMPOSITION,
