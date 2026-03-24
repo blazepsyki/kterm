@@ -28,3 +28,5 @@ tokio-rustls = "0.26.2"
 x509-cert = "0.2.5"
 sspi = { version = "0.18.7", features = ["network_client"] }
 bytemuck = { version = "1.25", features = ["derive"] }
+ironrdp-rdpsnd = "0.7.0"
+ironrdp-rdpsnd-native = "0.5.0"
