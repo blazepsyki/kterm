@@ -2,7 +2,8 @@
 
 pub mod renderer;
 
-use iced::widget::image;
+use renderer::DirtyRect;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum FrameUpdate {
@@ -24,8 +25,11 @@ pub enum FrameUpdate {
 pub struct RemoteDisplayState {
     pub width: u16,
     pub height: u16,
-    pub rgba: Vec<u8>,
-    pub handle: Option<image::Handle>,
+    pub rgba: Arc<Vec<u8>>,
+    pub dirty_rects: Vec<DirtyRect>,
+    pub full_upload: bool,
+    pub frame_ready: bool,
+    pub status_message: Option<String>,
 }
 
 impl RemoteDisplayState {
@@ -34,18 +38,26 @@ impl RemoteDisplayState {
         Self {
             width,
             height,
-            rgba: vec![0; len],
-            handle: None,
+            rgba: Arc::new(vec![0; len]),
+            dirty_rects: Vec::new(),
+            full_upload: true,
+            frame_ready: false,
+            status_message: None,
         }
     }
 
     pub fn apply(&mut self, update: FrameUpdate) {
+        // Get mutable access to the buffer (Arc::make_mut handles clone-on-write)
+        let buf = Arc::make_mut(&mut self.rgba);
+
         match update {
             FrameUpdate::Full { width, height, rgba } => {
                 self.width = width;
                 self.height = height;
-                self.rgba = rgba;
-                self.handle = Some(renderer::build_rgba_handle(self.width, self.height, self.rgba.clone()));
+                *buf = rgba;
+                self.full_upload = true;
+                self.dirty_rects.clear();
+                self.frame_ready = true;
             }
             FrameUpdate::Rect {
                 x,
@@ -83,13 +95,28 @@ impl RemoteDisplayState {
                     let dst_start = dst_y * dst_stride + x as usize * 4;
                     let dst_end = dst_start + row_bytes;
 
-                    if dst_end <= self.rgba.len() {
-                        self.rgba[dst_start..dst_end].copy_from_slice(&rgba[src_start..src_end]);
+                    if dst_end <= buf.len() {
+                        buf[dst_start..dst_end].copy_from_slice(&rgba[src_start..src_end]);
                     }
                 }
 
-                self.handle = Some(renderer::build_rgba_handle(self.width, self.height, self.rgba.clone()));
+                if !self.full_upload {
+                    self.dirty_rects.push(DirtyRect {
+                        x: x as u32,
+                        y: y as u32,
+                        width: rect_w as u32,
+                        height: rect_h as u32,
+                    });
+                }
+                self.frame_ready = true;
             }
         }
+    }
+
+    /// Called after the shader widget has consumed the current dirty state.
+    pub fn mark_clean(&mut self) {
+        self.dirty_rects.clear();
+        self.full_upload = false;
+        self.frame_ready = false;
     }
 }

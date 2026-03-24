@@ -3464,6 +3464,7 @@ name = "kterm"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytemuck",
  "bytes",
  "crossbeam-channel",
  "env_logger",
@@ -3471,6 +3472,7 @@ dependencies = [
  "iced",
  "ironrdp",
  "ironrdp-blocking",
+ "ironrdp-core",
  "log",
  "nectar",
  "portable-pty",

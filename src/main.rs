@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use iced::widget::{button, column, container, image as iced_image, pick_list, row, scrollable, text, vertical_slider, Space, text_input, Id, mouse_area, stack};
+use iced::widget::{button, column, container, pick_list, row, scrollable, text, vertical_slider, Space, text_input, Id, mouse_area, stack, shader};
 use iced::{Background, Color, Element, Length, Task, Subscription, event, keyboard, advanced::input_method, Font, font::Weight, mouse};
 use iced::widget::operation::focus;
 use iced::window;
@@ -199,6 +199,7 @@ struct State {
     pub window_id: Option<window::Id>,
     pub dummy_menu_open: Option<&'static str>,
     pub resizing_direction: Option<window::Direction>,
+    pub window_size: (f32, f32),
 }
 
 impl Default for State {
@@ -229,6 +230,7 @@ impl Default for State {
             window_id: None,
             dummy_menu_open: None,
             resizing_direction: None,
+            window_size: (1024.0, 768.0),
         }
     }
 }
@@ -287,6 +289,7 @@ pub enum Message {
     ClearSelection,
     TryHandleKey(keyboard::Key, keyboard::Modifiers),
     RemoteRdpInput(connection::RdpInput),
+    WindowSizeChanged(f32, f32),
 }
 
 // ---------- Update ----------
@@ -341,7 +344,14 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 match event {
                     connection::ConnectionEvent::Connected(sender) => {
                         session.sender = Some(sender.clone());
-                        let _ = sender.send(connection::ConnectionInput::Resize { cols: session.terminal.cols as u16, rows: session.terminal.rows as u16 });
+                        if matches!(session.kind, SessionKind::RemoteDisplay) {
+                            let (win_w, win_h) = state.window_size;
+                            let pixel_w = ((win_w - 181.0).max(200.0)) as u16;
+                            let pixel_h = ((win_h - 66.0).max(200.0)) as u16;
+                            let _ = sender.send(connection::ConnectionInput::Resize { cols: pixel_w, rows: pixel_h });
+                        } else {
+                            let _ = sender.send(connection::ConnectionInput::Resize { cols: session.terminal.cols as u16, rows: session.terminal.rows as u16 });
+                        }
                     }
                     connection::ConnectionEvent::Data(data) => {
                         if !data.is_empty() {
@@ -353,24 +363,37 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                             }
                         }
                     }
-                    connection::ConnectionEvent::Frame(frame) => {
+                    connection::ConnectionEvent::Frames(frames) => {
                         if session.remote_display.is_none() {
                             session.remote_display = Some(RemoteDisplayState::new(1280, 1024));
                         }
                         if let Some(display) = session.remote_display.as_mut() {
-                            display.apply(frame);
+                            display.status_message = None;
+                            for frame in frames {
+                                display.apply(frame);
+                            }
+                            // No flush needed — shader widget reads state directly in view()
                         }
                     }
                     connection::ConnectionEvent::Disconnected => {
                         session.sender = None;
-                        session.terminal.process_bytes(b"\r\n\x1b[31m[Disconnected]\x1b[0m\r\n");
-                        session.terminal.cache.clear();
+                        if let Some(display) = session.remote_display.as_mut() {
+                            display.status_message = Some("Disconnected".to_string());
+                        } else {
+                            session.terminal.process_bytes(b"\r\n\x1b[31m[Disconnected]\x1b[0m\r\n");
+                            session.terminal.cache.clear();
+                        }
                     }
                     connection::ConnectionEvent::Error(e) => {
                         session.sender = None;
-                        let msg = format!("\r\n\x1b[31m[Error: {}]\x1b[0m\r\n", e);
-                        session.terminal.process_bytes(msg.as_bytes());
-                        session.terminal.cache.clear();
+                        eprintln!("[RDP Error] {}", e);
+                        if let Some(display) = session.remote_display.as_mut() {
+                            display.status_message = Some(format!("Error: {}", e));
+                        } else {
+                            let msg = format!("\r\n\x1b[31m[Error: {}]\x1b[0m\r\n", e);
+                            session.terminal.process_bytes(msg.as_bytes());
+                            session.terminal.cache.clear();
+                        }
                     }
                 }
             }
@@ -600,7 +623,22 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::RemoteRdpInput(input) => {
             if let Some(session) = state.sessions.get_mut(state.active_index) {
                 if let Some(ref sender) = session.sender {
+                    let input = transform_rdp_mouse(input, state.window_size, session.remote_display.as_ref());
                     let _ = sender.send(connection::ConnectionInput::RdpInput(input));
+                }
+            }
+            Task::none()
+        }
+        Message::WindowSizeChanged(w, h) => {
+            state.window_size = (w, h);
+            // Resize active RemoteDisplay session
+            if let Some(session) = state.sessions.get(state.active_index) {
+                if matches!(session.kind, SessionKind::RemoteDisplay) {
+                    if let Some(ref sender) = session.sender {
+                        let pixel_w = ((w - 181.0).max(200.0)) as u16;
+                        let pixel_h = ((h - 66.0).max(200.0)) as u16;
+                        let _ = sender.send(connection::ConnectionInput::Resize { cols: pixel_w, rows: pixel_h });
+                    }
                 }
             }
             Task::none()
@@ -662,6 +700,7 @@ fn subscription(state: &State) -> Subscription<Message> {
     let mouse_sub = event::listen_with(|event, _status, _window| {
         match event {
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::ResizeFinished),
+            iced::Event::Window(window::Event::Resized(size)) => Some(Message::WindowSizeChanged(size.width, size.height)),
             _ => None
         }
     });
@@ -745,9 +784,20 @@ fn subscription(state: &State) -> Subscription<Message> {
         if state.window_id.is_none() { subs.push(window::open_events().map(Message::WindowIdCaptured)); }
         Subscription::batch(subs)
     } else {
-        let remote_sub = event::listen_with(|event, _status, _window| {
+        let remote_sub = event::listen_with(|event, status, _window| {
             match event {
-                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, text, .. }) => {
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, text, .. })
+                    if status == event::Status::Ignored =>
+                {
+                    // Scancode first (named/function keys)
+                    if let Some((code, extended)) = map_key_to_rdp_scancode(&key) {
+                        return Some(Message::RemoteRdpInput(connection::RdpInput::KeyboardScancode {
+                            code,
+                            extended,
+                            down: true,
+                        }));
+                    }
+                    // Fallback: Unicode for character keys
                     if let Some(ch) = text.and_then(|t| t.chars().next()) {
                         let codepoint = ch as u32;
                         if codepoint <= 0xFFFF {
@@ -757,23 +807,32 @@ fn subscription(state: &State) -> Subscription<Message> {
                             }));
                         }
                     }
-
-                    map_key_to_rdp_scancode(&key).map(|(code, extended)| {
-                        Message::RemoteRdpInput(connection::RdpInput::KeyboardScancode {
-                            code,
-                            extended,
-                            down: true,
-                        })
-                    })
+                    None
                 }
-                iced::Event::Keyboard(keyboard::Event::KeyReleased { key, .. }) => {
-                    map_key_to_rdp_scancode(&key).map(|(code, extended)| {
-                        Message::RemoteRdpInput(connection::RdpInput::KeyboardScancode {
+                iced::Event::Keyboard(keyboard::Event::KeyReleased { key, .. })
+                    if status == event::Status::Ignored =>
+                {
+                    // Scancode release for named/function keys
+                    if let Some((code, extended)) = map_key_to_rdp_scancode(&key) {
+                        return Some(Message::RemoteRdpInput(connection::RdpInput::KeyboardScancode {
                             code,
                             extended,
                             down: false,
-                        })
-                    })
+                        }));
+                    }
+                    // Unicode release for character keys
+                    if let keyboard::Key::Character(ref c) = key {
+                        if let Some(ch) = c.chars().next() {
+                            let codepoint = ch as u32;
+                            if codepoint <= 0xFFFF {
+                                return Some(Message::RemoteRdpInput(connection::RdpInput::KeyboardUnicode {
+                                    codepoint: codepoint as u16,
+                                    down: false,
+                                }));
+                            }
+                        }
+                    }
+                    None
                 }
                 iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
                     Some(Message::RemoteRdpInput(connection::RdpInput::MouseMove {
@@ -781,7 +840,9 @@ fn subscription(state: &State) -> Subscription<Message> {
                         y: position.y.max(0.0).min(u16::MAX as f32) as u16,
                     }))
                 }
-                iced::Event::Mouse(mouse::Event::ButtonPressed(button)) => {
+                iced::Event::Mouse(mouse::Event::ButtonPressed(button))
+                    if status == event::Status::Ignored =>
+                {
                     match button {
                         mouse::Button::Left => Some(Message::RemoteRdpInput(connection::RdpInput::MouseButton { button: connection::RdpMouseButton::Left, down: true })),
                         mouse::Button::Right => Some(Message::RemoteRdpInput(connection::RdpInput::MouseButton { button: connection::RdpMouseButton::Right, down: true })),
@@ -789,7 +850,9 @@ fn subscription(state: &State) -> Subscription<Message> {
                         _ => None,
                     }
                 }
-                iced::Event::Mouse(mouse::Event::ButtonReleased(button)) => {
+                iced::Event::Mouse(mouse::Event::ButtonReleased(button))
+                    if status == event::Status::Ignored =>
+                {
                     match button {
                         mouse::Button::Left => Some(Message::RemoteRdpInput(connection::RdpInput::MouseButton { button: connection::RdpMouseButton::Left, down: false })),
                         mouse::Button::Right => Some(Message::RemoteRdpInput(connection::RdpInput::MouseButton { button: connection::RdpMouseButton::Right, down: false })),
@@ -797,7 +860,9 @@ fn subscription(state: &State) -> Subscription<Message> {
                         _ => None,
                     }
                 }
-                iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
+                iced::Event::Mouse(mouse::Event::WheelScrolled { delta })
+                    if status == event::Status::Ignored =>
+                {
                     let v = match delta {
                         mouse::ScrollDelta::Lines { y, .. } => y,
                         mouse::ScrollDelta::Pixels { y, .. } => y / 40.0,
@@ -850,6 +915,53 @@ fn map_key_to_rdp_scancode(key: &keyboard::Key) -> Option<(u8, bool)> {
         keyboard::Key::Named(keyboard::key::Named::F11) => Some((0x57, false)),
         keyboard::Key::Named(keyboard::key::Named::F12) => Some((0x58, false)),
         _ => None,
+    }
+}
+
+fn transform_rdp_mouse(
+    input: connection::RdpInput,
+    window_size: (f32, f32),
+    display: Option<&RemoteDisplayState>,
+) -> connection::RdpInput {
+    match input {
+        connection::RdpInput::MouseMove { x, y } => {
+            const CONTENT_X: f32 = 181.0; // sidebar(180) + vr(1)
+            const CONTENT_Y: f32 = 66.0;  // title_bar(35) + tab_bar(30) + hr(1)
+
+            let (win_w, win_h) = window_size;
+            let content_w = (win_w - CONTENT_X).max(1.0);
+            let content_h = (win_h - CONTENT_Y).max(1.0);
+
+            let rel_x = (x as f32 - CONTENT_X).max(0.0);
+            let rel_y = (y as f32 - CONTENT_Y).max(0.0);
+
+            if let Some(display) = display {
+                let desk_w = display.width as f32;
+                let desk_h = display.height as f32;
+
+                // Compute contain-fit offset & scale (mirrors the WGSL shader logic)
+                let vp_aspect = content_w / content_h;
+                let tex_aspect = desk_w / desk_h;
+                let (scale_x, scale_y) = if tex_aspect > vp_aspect {
+                    // Letterbox (black bars top/bottom)
+                    (1.0, vp_aspect / tex_aspect)
+                } else {
+                    // Pillarbox (black bars left/right)
+                    (tex_aspect / vp_aspect, 1.0)
+                };
+                let rendered_w = content_w * scale_x;
+                let rendered_h = content_h * scale_y;
+                let offset_x = (content_w - rendered_w) * 0.5;
+                let offset_y = (content_h - rendered_h) * 0.5;
+
+                let rdp_x = ((rel_x - offset_x) / rendered_w * desk_w).clamp(0.0, desk_w - 1.0) as u16;
+                let rdp_y = ((rel_y - offset_y) / rendered_h * desk_h).clamp(0.0, desk_h - 1.0) as u16;
+                connection::RdpInput::MouseMove { x: rdp_x, y: rdp_y }
+            } else {
+                connection::RdpInput::MouseMove { x: rel_x as u16, y: rel_y as u16 }
+            }
+        }
+        other => other,
     }
 }
 
@@ -1087,9 +1199,27 @@ fn view(state: &State) -> Element<'_, Message> {
             }
             SessionKind::RemoteDisplay => {
                 if let Some(display) = &session.remote_display {
-                    if let Some(handle) = &display.handle {
+                    if let Some(ref msg) = display.status_message {
+                        scrollable(
+                            container(
+                                text(msg.clone()).size(12).color(Color::from_rgb(0.0, 1.0, 0.4))
+                            )
+                            .padding(10)
+                            .width(Length::Fill)
+                        )
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .into()
+                    } else if display.width > 0 {
+                        let program = remote_display::renderer::RdpDisplayProgram {
+                            frame: std::sync::Arc::clone(&display.rgba),
+                            tex_width: display.width as u32,
+                            tex_height: display.height as u32,
+                            dirty_rects: Vec::new(),
+                            full_upload: true,
+                        };
                         container(
-                            iced_image(handle.clone())
+                            shader(program)
                                 .width(Length::Fill)
                                 .height(Length::Fill)
                         )

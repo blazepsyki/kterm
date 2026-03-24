@@ -43,7 +43,7 @@ pub enum RdpMouseButton {
 pub enum ConnectionEvent {
     Connected(mpsc::UnboundedSender<ConnectionInput>),
     Data(Vec<u8>),
-    Frame(FrameUpdate),
+    Frames(Vec<FrameUpdate>),
     Disconnected,
     Error(String),
 }
@@ -60,7 +60,7 @@ impl std::fmt::Debug for ConnectionEvent {
         match self {
             Self::Connected(_) => write!(f, "Connected"),
             Self::Data(d) => write!(f, "Data({} bytes)", d.len()),
-            Self::Frame(_) => write!(f, "Frame"),
+            Self::Frames(frames) => write!(f, "Frames({})", frames.len()),
             Self::Disconnected => write!(f, "Disconnected"),
             Self::Error(e) => write!(f, "Error({})", e),
         }
@@ -72,7 +72,7 @@ impl Clone for ConnectionEvent {
         match self {
             Self::Connected(s) => Self::Connected(s.clone()),
             Self::Data(d) => Self::Data(d.clone()),
-            Self::Frame(frame) => Self::Frame(frame.clone()),
+            Self::Frames(frames) => Self::Frames(frames.clone()),
             Self::Disconnected => Self::Disconnected,
             Self::Error(e) => Self::Error(e.clone()),
         }
