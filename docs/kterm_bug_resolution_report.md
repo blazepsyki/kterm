@@ -56,3 +56,30 @@
 
 ### 🎉 결론
 오로지 화면상의 문자와 이스케이프 시퀀스의 기형적 논리 패턴만을 분석하여 터미널과 서버 간 동기화를 무너뜨렸던 가장 악랄했던 십여 개의 버그 사슬을 완벽하게 치료해냈습니다.
+
+---
+
+## 4. RDP/XRDP NumLock 불일치 이슈와 현재 타협안
+
+RDP 세션, 특히 XRDP + LXQt 조합에서 로그인 화면 이후 GUI가 로드된 뒤 첫 NumPad 입력이 숫자가 아닌 방향키/내비게이션 키로 해석되는 문제가 확인되었습니다.
+
+### 4-1. 증상
+- 로컬 Windows 측 NumLock은 ON 상태입니다.
+- XRDP 로그인 화면에서는 sync가 정상 동작하는 것처럼 보이지만, LXQt 데스크톱이 올라온 직후 첫 NumPad 입력은 원격에서 `Home/End/Arrow/Insert/Delete` 계열로 처리됩니다.
+- Lock 키를 한 번 누르거나 포커스를 전환해 다시 sync를 보내면 이후에는 정상 동작합니다.
+
+### 4-2. 분석
+- `TS_SYNC_EVENT`, `DeactivateAll`, `SetKeyboardIndicators`를 활용한 프로토콜 기반 복구 가능성을 우선 검토했습니다.
+- 이를 위해 RDP PDU 추적 로그를 추가해 연결/런타임 구간을 확인했습니다.
+- 결과적으로 테스트한 XRDP(LXQt) 서버는 로그인 화면 → 데스크톱 전환 시 `DeactivateAll`, `SetKeyboardIndicators`, 추가 `SaveSessionInfo`를 보내지 않았습니다.
+- 즉, 원격 X11 세션이 NumLock 상태를 내부적으로 재설정해도 클라이언트는 이를 RDP 이벤트로 감지할 수 없었습니다.
+
+### 4-3. 적용한 방식
+- 모든 키다운 전에 sync를 보내는 방식은 동작하지만 범위가 과도했습니다.
+- 최종적으로 NumLock 해석에 직접 영향을 받는 NumPad/Navigation 충돌 스캔코드(`0x47..0x53`)에 한해, key-down 직전에 `TS_SYNC_EVENT`를 먼저 전송하도록 정리했습니다.
+- 결과적으로 문제의 직접 원인인 `NumPad 0-9`, `Decimal`, `Home/End/PageUp/PageDown/Insert/Delete/Arrow` 충돌 영역만 보정합니다.
+
+### 4-4. 한계
+- XRDP가 별도 전환 PDU를 보내지 않는 이상, “LXQt가 정확히 올라온 순간”을 프로토콜 차원에서 식별할 수 없습니다.
+- 따라서 현재 방식은 완전한 자동 복구가 아니라, 문제가 발생하는 입력 직전에만 상태를 맞추는 실용적 절충안입니다.
+- 일반 문자 키나 다른 lock-state 변화까지 모두 커버하는 보편 해법은 아닙니다.

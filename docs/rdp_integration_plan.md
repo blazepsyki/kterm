@@ -10,7 +10,7 @@
 | TCP + TLS 1.2/1.3 업그레이드 | `ironrdp-tls` 크레이트 기반 (`NoCertificateVerification` 내장, 인증서 검증은 R7) |
 | 사용자명/비밀번호 인증 | `Credentials::UsernamePassword` |
 | 서버 인증서 공개키 추출 | CredSSP 채널 바인딩용 |
-| 고정 초기 데스크톱 크기 협상 | 1280×1024 하드코딩 |
+| 고정 초기 데스크톱 크기 협상 | 1280×720 하드코딩 |
 
 #### 그래픽 / 화면
 | 항목 | 비고 |
@@ -34,6 +34,9 @@
 |------|------|
 | 키보드 스캔코드 FastPath | `FastPathInputEvent::KeyboardEvent` |
 | 키보드 유니코드 FastPath | `FastPathInputEvent::UnicodeKeyboardEvent` |
+| XRDP NumLock 충돌 완화 | NumPad/Navigation 충돌 스캔코드(`0x47..0x53`) key-down 직전 `TS_SYNC_EVENT` 전송 |
+| 원격 IME commit 입력 | Iced `InputMethod::Commit` 문자열을 RDP Unicode key down/up 시퀀스로 전송 |
+| 원격 Secure Attention alias | `Ctrl+Alt+End` 입력을 원격 `Ctrl+Alt+Del`의 Delete 구간으로 매핑 |
 | Extended 키 플래그 | 화살표, Insert, Delete, Home 등 |
 | 마우스 이동 | `PointerFlags::MOVE` |
 | 마우스 좌/우/중 클릭 | `LEFT_BUTTON`, `RIGHT_BUTTON`, `MIDDLE_BUTTON` |
@@ -83,8 +86,10 @@
 | 항목 | 비고 |
 |------|------|
 | 마우스 수평 휠 | `PointerFlags::HORIZONTAL_WHEEL` 미구현 |
-| IME 조합 입력 | 한국어 등 다국어 입력 조합 미처리 |
-| 복합 키 조합 정밀 매핑 | Ctrl+Alt+Del, Win 키 등 |
+| IME 조합 입력 | commit 문자열 전송만 지원, 조합 상태/후보창/세밀한 locale 정책은 미처리 |
+| 복합 키 조합 정밀 매핑 | `Ctrl+Alt+End -> Ctrl+Alt+Del`만 지원, 나머지 복합 조합 정책은 미완 |
+| 서버 lock-state 전환의 프로토콜 기반 감지 | 테스트한 XRDP(LXQt)는 로그인 → 데스크톱 전환 시 `DeactivateAll`/`SetKeyboardIndicators`를 보내지 않아 불가 |
+| NumLock 불일치의 완전 자동 복구 | 현재는 NumPad/Navigation 충돌 키에서만 pre-keydown sync 적용 |
 | 멀티터치 | |
 
 #### 채널 / 리다이렉션
@@ -121,6 +126,9 @@
 - IronRDP TLS 핸드셰이크 + `ActiveStage` 기반 연속 PDU 루프 완료.
 - `remote_display` 공통 모듈과 RDP 탭 이미지 렌더링(Full/Rect) 연동 완료.
 - 기본 키보드/마우스 입력 매핑(FastPath): 스캔코드, 유니코드, 이동/클릭/휠 완료.
+- XRDP(LXQt) 환경의 초기 NumLock 불일치 문제에 대해, 전환 PDU가 오지 않는 서버 특성을 로그로 확인했고 NumPad/Navigation 충돌 스캔코드에 한정한 pre-keydown `TS_SYNC_EVENT` 절충안을 적용.
+- 원격 디스플레이 세션에서 Iced IME commit 문자열을 RDP Unicode 입력으로 전송하도록 분기 처리 완료.
+- 원격 Secure Attention alias로 `Ctrl+Alt+End`를 `Ctrl+Alt+Del`의 Delete 입력으로 매핑 완료.
 - 다중 픽섹 포맷 디코딩(RDP6 32bpp, RLE 16/24bpp, 비압축 BGRX/RGB565) 완료.
 - wgpu GPU 텍스처 + WGSL 쉐이더 기반 `RdpPipeline` 렌더러 완료.
 - Dirty Rect 단위 부분 텍스처 업로드(GPU 대역폭 최소화) 완료.
@@ -187,10 +195,16 @@
 - [ ] RDP 백엔드를 공통 렌더러에 연결
 - [ ] VNC 백엔드 연결 시 코드 변경 최소화(목표: UI 코드 변경 0 또는 극소)
 
-### Phase 3: 입력/상호작용 (완료)
+### Phase 3: 입력/상호작용 (부분 완료)
 - [x] 키보드 입력을 RDP FastPath(스캔코드/유니코드)로 기본 매핑
 - [x] 마우스 이동/클릭/휠 이벤트 기본 매핑
+- [x] XRDP NumLock 불일치 완화: NumPad/Navigation 충돌 키(`0x47..0x53`) 입력 직전 lock-state sync
 - [ ] 포커스 및 입력 캡처 정책 정리
+
+평가:
+현재 구현은 실사용 기준의 기본 입력 경로는 갖추고 있으며, 이번 작업으로 XRDP(LXQt) 환경에서 발생하던 NumLock 불일치도 문제를 일으키는 keypad/navigation 충돌 키 범위에서 완화되었습니다.
+다만 이 Phase를 "완료"로 보기에는 부족합니다. 문서 하단의 리팩토링 계획 기준으로 보면, `ironrdp-input` 크레이트 전환, IME 조합 상태/후보창 처리, 추가 복합 키 조합/캡처 정책 정리는 아직 남아 있습니다.
+즉, 현재 상태는 "기본 입력 동작 완료 + 특정 XRDP 결함 완화 완료"이며, 원래 의도한 R3 전체 범위는 미완입니다.
 
 ### Phase 4: 세션 품질
 - [ ] 윈도우 리사이즈를 원격 해상도 변경으로 반영
@@ -215,6 +229,8 @@
 
 ## 주의사항
 - 초기에 RDP는 터미널 바이트 스트림과 모델이 달라서 별도 이벤트 계층이 필요하다.
+- 테스트한 XRDP(LXQt) 조합은 로그인 화면 → 데스크톱 전환 시 세션 재활성화 PDU를 보내지 않았다. 따라서 이 구간의 NumLock 상태 변화는 화면 업데이트만으로 나타나며, 프로토콜 이벤트 기반 자동 감지는 기대할 수 없다.
+- 이 제약 때문에 현재 구현은 문제를 일으키는 keypad/navigation 충돌 키에만 `TS_SYNC_EVENT`를 선행 전송하는 방향으로 타협했다.
 
 ---
 
@@ -320,20 +336,35 @@
 
 ---
 
-## Phase R3: 입력 처리 개선
+## Phase R3: 입력 처리 개선 (부분 완료)
 
 > 수동 FastPath 매핑 → `ironrdp-input` 크레이트
 
+### 상태 평가
+- 완료된 범위
+   - 수동 FastPath 기반의 기본 키보드/마우스 입력 경로는 이미 동작 중입니다.
+   - XRDP(LXQt)에서 로그인 화면 이후 NumLock 상태가 어긋나던 문제는, NumPad/Navigation 충돌 스캔코드(`0x47..0x53`)에 한해 key-down 직전 `TS_SYNC_EVENT`를 보내는 방식으로 완화했습니다.
+   - `Cargo.toml`에 `ironrdp-input = "0.5.0"`를 직접 의존성으로 추가했고, `rdp.rs` 백엔드 입력 파이프라인은 `ironrdp` 메타 크레이트 재수출 대신 `ironrdp-input` 타입(`Database`, `Operation`, `Scancode` 등)을 직접 사용하도록 전환했습니다.
+- 미완 범위
+   - `main.rs`의 수동 스캔코드 매핑은 그대로 유지되고 있습니다.
+   - `rdp.rs`도 상위 이벤트를 어떤 스캔코드로 보낼지 결정하는 정책 자체는 여전히 수동 매핑에 의존합니다.
+   - IME 조합 입력, 복합 키 조합, 입력 캡처 정책 정리는 아직 남아 있습니다.
+
+결론:
+이번에 해결한 XRDP NumLock 이슈는 분명히 R3 범주의 문제였지만, 이는 R3 전체 완료가 아니라 "현재 수동 입력 경로를 유지한 채 특정 결함을 완화한 것"에 가깝습니다.
+따라서 R3의 현재 상태는 완료가 아니라 부분 완료로 보는 것이 정확합니다.
+
 ### 변경 내용
-1. **`Cargo.toml`**: `ironrdp-input = "0.5.0"` 추가
-2. **`rdp.rs` `rdp_input_to_fastpath()` 교체**:
-   - `ironrdp_input::InputDatabase` 활용하여 키보드/마우스 입력 관리
-   - 키보드: scancode ↔ virtual key 변환, modifier 상태 추적
-   - 마우스: 좌표 변환, 버튼 상태 추적
-3. **`main.rs` `map_key_to_rdp_scancode()` 개선**:
+1. **1차 적용 완료**
+   - `Cargo.toml`에 `ironrdp-input = "0.5.0"` 직접 의존성 추가
+   - `ironrdp` 메타 크레이트의 `input` feature 제거
+   - `rdp.rs`에서 `Database`, `Operation`, `Scancode`, `synchronize_event` 등을 `ironrdp-input` 직접 import로 전환
+   - pre-keydown sync / modifier release 경로의 중복 로직 정리
+2. **후속 예정**
+   - `main.rs` `map_key_to_rdp_scancode()` 개선
    - `ironrdp-input`의 키 매핑 테이블 활용
    - IME 조합 입력 기초 지원 (한국어/일본어/중국어)
-4. **추가 입력 지원**:
+3. **추가 입력 지원**:
    - 마우스 수평 휠 (`PointerFlags::HORIZONTAL_WHEEL`)
    - 복합 키 조합 (Ctrl+Alt+Del, Win 키 등)
    - Extended 키 플래그 정밀화
@@ -342,6 +373,10 @@
 - 입력 매핑 코드 단순화
 - IME/다국어 입력 지원 기초 확보
 - modifier 상태 추적 정확도 향상
+
+### 현재 판단
+- 이 계획은 여전히 유효하지만, 우선순위는 "전체 입력 스택 교체"보다 "현재 수동 매핑의 남은 결함을 필요한 범위만 보완"으로 낮아졌습니다.
+- 특히 XRDP NumLock 문제는 서버가 전환 PDU를 보내지 않는다는 제약이 확인되었으므로, `ironrdp-input` 도입만으로 완전히 해결된다고 보기는 어렵습니다.
 
 ---
 
@@ -378,7 +413,7 @@
    - 동적 채널 핸들러 프레임워크 연결
 3. **DisplayControl 채널**:
    - 창 리사이즈 이벤트 → `DisplayControlMonitorLayout` PDU 전송
-   - 현재 하드코딩된 1280×1024 → 동적 해상도 협상
+   - 현재 하드코딩된 1280×720 → 동적 해상도 협상
    - UI 리사이즈 → debounce(300ms) → 시스템 해상도 변경 PDU 전송
 4. **`build_config()` 수정**:
    - `desktop_size` 동적 설정 (UI 창 크기 또는 모니터 해상도 기반)

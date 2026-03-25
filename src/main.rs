@@ -11,6 +11,11 @@ mod terminal;
 mod connection;
 mod platform;
 mod remote_display;
+use connection::rdp_input_policy::{
+    current_keyboard_indicators, is_remote_secure_attention_key,
+    is_remote_secure_attention_shortcut, remote_secure_attention_inputs, route_key_pressed,
+    route_key_released, unicode_inputs_for_text, RoutedKeyEvent,
+};
 use remote_display::RemoteDisplayState;
 use terminal::{TerminalEmulator, TerminalView, Selection};
 use tokio::sync::mpsc;
@@ -135,6 +140,7 @@ struct Session {
     terminal: TerminalEmulator,
     remote_display: Option<RemoteDisplayState>,
     sender: Option<mpsc::UnboundedSender<connection::ConnectionInput>>,
+    rdp_secure_attention_active: bool,
 }
 
 impl Session {
@@ -146,6 +152,7 @@ impl Session {
             terminal: TerminalEmulator::new(24, 80),
             remote_display: None,
             sender: None,
+            rdp_secure_attention_active: false,
         }
     }
 
@@ -157,6 +164,7 @@ impl Session {
             terminal: TerminalEmulator::new(rows, cols),
             remote_display: None,
             sender: None,
+            rdp_secure_attention_active: false,
         }
     }
 
@@ -168,6 +176,7 @@ impl Session {
             terminal: TerminalEmulator::new(24, 80),
             remote_display: Some(RemoteDisplayState::new(width, height)),
             sender: None,
+            rdp_secure_attention_active: false,
         }
     }
 }
@@ -333,6 +342,10 @@ pub enum Message {
     ClearSelection,
     TryHandleKey(keyboard::Key, keyboard::Modifiers),
     RemoteRdpInput(connection::RdpInput),
+    RemoteRdpInputs(Vec<connection::RdpInput>),
+    RemoteSecureAttention(bool),
+    SyncRdpKeyboardIndicators,
+    ReleaseRdpModifiers,
     WindowSizeChanged(f32, f32),
 }
 
@@ -372,10 +385,21 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ImeCommit(text_str) => {
-            let bytes = text_str.into_bytes();
             if let Some(session) = state.sessions.get_mut(state.active_index) {
-                if let Some(ref sender) = session.sender { let _ = sender.send(connection::ConnectionInput::Data(bytes)); }
-                else { session.terminal.process_bytes(&bytes); }
+                if matches!(session.kind, SessionKind::RemoteDisplay) {
+                    if let Some(ref sender) = session.sender {
+                        for input in unicode_inputs_for_text(&text_str) {
+                            let _ = sender.send(connection::ConnectionInput::RdpInput(input));
+                        }
+                    }
+                } else {
+                    let bytes = text_str.into_bytes();
+                    if let Some(ref sender) = session.sender {
+                        let _ = sender.send(connection::ConnectionInput::Data(bytes));
+                    } else {
+                        session.terminal.process_bytes(&bytes);
+                    }
+                }
                 session.terminal.clear_preedit();
             }
             Task::none()
@@ -393,6 +417,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                             let pixel_w = ((win_w - 181.0).max(200.0)) as u16;
                             let pixel_h = ((win_h - 66.0).max(200.0)) as u16;
                             let _ = sender.send(connection::ConnectionInput::Resize { cols: pixel_w, rows: pixel_h });
+                            let _ = sender.send(connection::ConnectionInput::SyncKeyboardIndicators(current_keyboard_indicators()));
                         } else {
                             let _ = sender.send(connection::ConnectionInput::Resize { cols: session.terminal.cols as u16, rows: session.terminal.rows as u16 });
                         }
@@ -409,7 +434,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                     }
                     connection::ConnectionEvent::Frames(frames) => {
                         if session.remote_display.is_none() {
-                            session.remote_display = Some(RemoteDisplayState::new(1280, 1024));
+                            session.remote_display = Some(RemoteDisplayState::new(1280, 720));
                         }
                         if let Some(display) = session.remote_display.as_mut() {
                             display.status_message = None;
@@ -575,7 +600,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             let mut target_id = None;
             if let Some(session) = state.sessions.get_mut(target_index) {
                 target_id = Some(session.id);
-                *session = Session::new_remote_display(session.id, name, 1280, 1024);
+                *session = Session::new_remote_display(session.id, name, 1280, 720);
             }
 
             if let Some(target_id) = target_id {
@@ -678,6 +703,48 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::RemoteRdpInputs(inputs) => {
+            if let Some(session) = state.sessions.get_mut(state.active_index) {
+                if let Some(ref sender) = session.sender {
+                    for input in inputs {
+                        let input = transform_rdp_mouse(input, state.window_size, session.remote_display.as_ref());
+                        let _ = sender.send(connection::ConnectionInput::RdpInput(input));
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::RemoteSecureAttention(active) => {
+            if let Some(session) = state.sessions.get_mut(state.active_index) {
+                session.rdp_secure_attention_active = active;
+                if let Some(ref sender) = session.sender {
+                    for input in remote_secure_attention_inputs(active) {
+                        let _ = sender.send(connection::ConnectionInput::RdpInput(input));
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::SyncRdpKeyboardIndicators => {
+            if let Some(session) = state.sessions.get(state.active_index) {
+                if matches!(session.kind, SessionKind::RemoteDisplay) {
+                    if let Some(ref sender) = session.sender {
+                        let _ = sender.send(connection::ConnectionInput::SyncKeyboardIndicators(current_keyboard_indicators()));
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::ReleaseRdpModifiers => {
+            if let Some(session) = state.sessions.get(state.active_index) {
+                if matches!(session.kind, SessionKind::RemoteDisplay) {
+                    if let Some(ref sender) = session.sender {
+                        let _ = sender.send(connection::ConnectionInput::ReleaseAllModifiers);
+                    }
+                }
+            }
+            Task::none()
+        }
         Message::WindowSizeChanged(w, h) => {
             state.window_size = (w, h);
             // Resize active RemoteDisplay session
@@ -752,6 +819,8 @@ fn subscription(state: &State) -> Subscription<Message> {
         match event {
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::ResizeFinished),
             iced::Event::Window(window::Event::Resized(size)) => Some(Message::WindowSizeChanged(size.width, size.height)),
+            iced::Event::Window(window::Event::Focused) => Some(Message::SyncRdpKeyboardIndicators),
+            iced::Event::Window(window::Event::Unfocused) => Some(Message::ReleaseRdpModifiers),
             _ => None
         }
     });
@@ -837,53 +906,41 @@ fn subscription(state: &State) -> Subscription<Message> {
     } else {
         let remote_sub = event::listen_with(|event, status, _window| {
             match event {
-                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, text, .. })
+                iced::Event::InputMethod(ime) => match ime {
+                    input_method::Event::Commit(text) => Some(Message::ImeCommit(text)),
+                    _ => None,
+                },
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { key, text, physical_key, modifiers, .. })
                     if status == event::Status::Ignored =>
                 {
-                    // Scancode first (named/function keys)
-                    if let Some((code, extended)) = map_key_to_rdp_scancode(&key) {
-                        return Some(Message::RemoteRdpInput(connection::RdpInput::KeyboardScancode {
-                            code,
-                            extended,
-                            down: true,
-                        }));
+                    if is_remote_secure_attention_shortcut(&physical_key, modifiers) {
+                        return Some(Message::RemoteSecureAttention(true));
                     }
-                    // Fallback: Unicode for character keys
-                    if let Some(ch) = text.and_then(|t| t.chars().next()) {
-                        let codepoint = ch as u32;
-                        if codepoint <= 0xFFFF {
-                            return Some(Message::RemoteRdpInput(connection::RdpInput::KeyboardUnicode {
-                                codepoint: codepoint as u16,
-                                down: true,
-                            }));
+
+                    match route_key_pressed(&key, text.as_deref(), &physical_key) {
+                        RoutedKeyEvent::Ignore => None,
+                        RoutedKeyEvent::SyncIndicators => {
+                            Some(Message::SyncRdpKeyboardIndicators)
                         }
+                        RoutedKeyEvent::Input(input) => Some(Message::RemoteRdpInput(input)),
                     }
-                    None
                 }
-                iced::Event::Keyboard(keyboard::Event::KeyReleased { key, .. })
+                iced::Event::Keyboard(keyboard::Event::KeyReleased { key, physical_key, modifiers, .. })
                     if status == event::Status::Ignored =>
                 {
-                    // Scancode release for named/function keys
-                    if let Some((code, extended)) = map_key_to_rdp_scancode(&key) {
-                        return Some(Message::RemoteRdpInput(connection::RdpInput::KeyboardScancode {
-                            code,
-                            extended,
-                            down: false,
-                        }));
+                    if is_remote_secure_attention_shortcut(&physical_key, modifiers)
+                        || (is_remote_secure_attention_key(&physical_key) && modifiers.control() && modifiers.alt())
+                    {
+                        return Some(Message::RemoteSecureAttention(false));
                     }
-                    // Unicode release for character keys
-                    if let keyboard::Key::Character(ref c) = key {
-                        if let Some(ch) = c.chars().next() {
-                            let codepoint = ch as u32;
-                            if codepoint <= 0xFFFF {
-                                return Some(Message::RemoteRdpInput(connection::RdpInput::KeyboardUnicode {
-                                    codepoint: codepoint as u16,
-                                    down: false,
-                                }));
-                            }
+
+                    match route_key_released(&key, &physical_key) {
+                        RoutedKeyEvent::Ignore => None,
+                        RoutedKeyEvent::SyncIndicators => {
+                            Some(Message::SyncRdpKeyboardIndicators)
                         }
+                        RoutedKeyEvent::Input(input) => Some(Message::RemoteRdpInput(input)),
                     }
-                    None
                 }
                 iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
                     Some(Message::RemoteRdpInput(connection::RdpInput::MouseMove {
@@ -914,17 +971,22 @@ fn subscription(state: &State) -> Subscription<Message> {
                 iced::Event::Mouse(mouse::Event::WheelScrolled { delta })
                     if status == event::Status::Ignored =>
                 {
-                    let v = match delta {
-                        mouse::ScrollDelta::Lines { y, .. } => y,
-                        mouse::ScrollDelta::Pixels { y, .. } => y / 40.0,
+                    let (hx, vy) = match delta {
+                        mouse::ScrollDelta::Lines { x, y } => (x, y),
+                        mouse::ScrollDelta::Pixels { x, y } => (x / 40.0, y / 40.0),
                     };
-                    let step = (v * 120.0).round();
-                    if step == 0.0 {
-                        None
-                    } else {
+                    let vy_step = (vy * 120.0).round();
+                    let hx_step = (hx * 120.0).round();
+                    if vy_step != 0.0 {
                         Some(Message::RemoteRdpInput(connection::RdpInput::MouseWheel {
-                            delta: step.max(i16::MIN as f32).min(i16::MAX as f32) as i16,
+                            delta: vy_step.max(i16::MIN as f32).min(i16::MAX as f32) as i16,
                         }))
+                    } else if hx_step != 0.0 {
+                        Some(Message::RemoteRdpInput(connection::RdpInput::MouseHorizontalWheel {
+                            delta: hx_step.max(i16::MIN as f32).min(i16::MAX as f32) as i16,
+                        }))
+                    } else {
+                        None
                     }
                 }
                 _ => None,
@@ -934,38 +996,6 @@ fn subscription(state: &State) -> Subscription<Message> {
         let mut subs = vec![mouse_sub, menu_close_sub, remote_sub];
         if state.window_id.is_none() { subs.push(window::open_events().map(Message::WindowIdCaptured)); }
         Subscription::batch(subs)
-    }
-}
-
-fn map_key_to_rdp_scancode(key: &keyboard::Key) -> Option<(u8, bool)> {
-    match key {
-        keyboard::Key::Named(keyboard::key::Named::Enter) => Some((0x1C, false)),
-        keyboard::Key::Named(keyboard::key::Named::Backspace) => Some((0x0E, false)),
-        keyboard::Key::Named(keyboard::key::Named::Tab) => Some((0x0F, false)),
-        keyboard::Key::Named(keyboard::key::Named::Escape) => Some((0x01, false)),
-        keyboard::Key::Named(keyboard::key::Named::ArrowUp) => Some((0x48, true)),
-        keyboard::Key::Named(keyboard::key::Named::ArrowDown) => Some((0x50, true)),
-        keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => Some((0x4B, true)),
-        keyboard::Key::Named(keyboard::key::Named::ArrowRight) => Some((0x4D, true)),
-        keyboard::Key::Named(keyboard::key::Named::Home) => Some((0x47, true)),
-        keyboard::Key::Named(keyboard::key::Named::End) => Some((0x4F, true)),
-        keyboard::Key::Named(keyboard::key::Named::PageUp) => Some((0x49, true)),
-        keyboard::Key::Named(keyboard::key::Named::PageDown) => Some((0x51, true)),
-        keyboard::Key::Named(keyboard::key::Named::Insert) => Some((0x52, true)),
-        keyboard::Key::Named(keyboard::key::Named::Delete) => Some((0x53, true)),
-        keyboard::Key::Named(keyboard::key::Named::F1) => Some((0x3B, false)),
-        keyboard::Key::Named(keyboard::key::Named::F2) => Some((0x3C, false)),
-        keyboard::Key::Named(keyboard::key::Named::F3) => Some((0x3D, false)),
-        keyboard::Key::Named(keyboard::key::Named::F4) => Some((0x3E, false)),
-        keyboard::Key::Named(keyboard::key::Named::F5) => Some((0x3F, false)),
-        keyboard::Key::Named(keyboard::key::Named::F6) => Some((0x40, false)),
-        keyboard::Key::Named(keyboard::key::Named::F7) => Some((0x41, false)),
-        keyboard::Key::Named(keyboard::key::Named::F8) => Some((0x42, false)),
-        keyboard::Key::Named(keyboard::key::Named::F9) => Some((0x43, false)),
-        keyboard::Key::Named(keyboard::key::Named::F10) => Some((0x44, false)),
-        keyboard::Key::Named(keyboard::key::Named::F11) => Some((0x57, false)),
-        keyboard::Key::Named(keyboard::key::Named::F12) => Some((0x58, false)),
-        _ => None,
     }
 }
 
@@ -994,10 +1024,8 @@ fn transform_rdp_mouse(
                 let vp_aspect = content_w / content_h;
                 let tex_aspect = desk_w / desk_h;
                 let (scale_x, scale_y) = if tex_aspect > vp_aspect {
-                    // Letterbox (black bars top/bottom)
                     (1.0, vp_aspect / tex_aspect)
                 } else {
-                    // Pillarbox (black bars left/right)
                     (tex_aspect / vp_aspect, 1.0)
                 };
                 let rendered_w = content_w * scale_x;

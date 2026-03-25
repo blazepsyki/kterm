@@ -2,32 +2,38 @@
 
 use iced::futures::{self, StreamExt};
 use std::time::{Duration, Instant};
+use std::io::Write as _;
+use std::fs::OpenOptions;
 
 use ironrdp::connector;
 use ironrdp::connector::{BitmapConfig, ConnectionResult, Credentials};
 use ironrdp::graphics::image_processing::PixelFormat;
 use ironrdp::pdu::geometry::{InclusiveRectangle, Rectangle};
-use ironrdp::pdu::input::fast_path::{FastPathInputEvent, KeyboardFlags};
-use ironrdp::pdu::input::mouse::PointerFlags;
-use ironrdp::pdu::input::MousePdu;
 use ironrdp::pdu::gcc::KeyboardType;
 use ironrdp::pdu::rdp::capability_sets::{MajorPlatformType, BitmapCodecs, Codec, CodecProperty, NsCodec};
 use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
 use ironrdp::pdu::rdp::headers::ShareDataPdu;
 use ironrdp::pdu::bitmap::{BitmapUpdateData, Compression};
 use ironrdp::pdu::Action;
+use ironrdp::connector as rdp_connector;
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{ActiveStage, ActiveStageOutput};
-use ironrdp_core::{ReadCursor, Decode as _};
+use ironrdp::connector::connection_activation::ConnectionActivationState;
+use ironrdp_core::{ReadCursor, Decode as _, WriteBuf};
 use ironrdp_tokio::{Framed, FramedWrite, MovableTokioStream,
-    connect_begin, connect_finalize, mark_as_upgraded};
+    connect_begin, connect_finalize, mark_as_upgraded, single_sequence_step};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 
 use ironrdp_rdpsnd::client::Rdpsnd;
 use ironrdp_rdpsnd_native::cpal::RdpsndBackend;
+use ironrdp_input::{
+    synchronize_event, Database, MouseButton as IrdpMouseButton, MousePosition, Operation, Scancode,
+    WheelRotations,
+};
 
-use crate::connection::{ConnectionEvent, ConnectionInput, RdpInput, RdpMouseButton};
+use crate::connection::{ConnectionEvent, ConnectionInput, KeyboardIndicators, RdpInput, RdpMouseButton};
+use crate::connection::rdp_input_policy::is_numlock_conflict_scancode;
 use crate::remote_display::FrameUpdate;
 
 pub fn connect_and_subscribe(
@@ -106,6 +112,16 @@ async fn run_rdp_worker_inner(
     tx_from_worker: mpsc::UnboundedSender<ConnectionEvent>,
     tx_to_rdp: mpsc::UnboundedSender<ConnectionInput>,
 ) -> Result<(), String> {
+    // --- PDU trace log -------------------------------------------------------
+    // Log handshake sequencing plus every runtime Action so protocol behavior
+    // can be inspected end-to-end.
+    let pdu_log_path = "rdp_pdu_trace.log";
+    let mut pdu_log = OpenOptions::new()
+        .create(true).append(true).open(pdu_log_path)
+        .map_err(|e| format!("cannot open PDU log: {}", e))?;
+    writeln!(pdu_log, "\n=== RDP session start  host={host} ===")
+        .map_err(|e| format!("pdu_log write: {}", e))?;
+
     let config = build_config(username, password, None);
     let (connection_result, mut framed) = connect(config, host.clone(), port).await?;
 
@@ -123,8 +139,8 @@ async fn run_rdp_worker_inner(
     let mut processed_pdus = 0usize;
     let mut last_frame_emit = Instant::now();
     let mut pending_rect: Option<InclusiveRectangle> = None;
-    let mut cursor_x: u16 = 0;
-    let mut cursor_y: u16 = 0;
+    let mut input_db = Database::new();
+    let mut last_indicators: Option<KeyboardIndicators> = None;
 
     let summary = format!(
         "\r\n[RDP] IronRDP handshake completed: server={} port={} desktop={}x{}\r\n",
@@ -142,13 +158,38 @@ async fn run_rdp_worker_inner(
                     let _ = tx_from_worker.send(ConnectionEvent::Disconnected);
                     return Ok(());
                 };
+                // Track last known lock-key state for pre-keydown sync.
+                if let ConnectionInput::SyncKeyboardIndicators(ind) = &input {
+                    last_indicators = Some(*ind);
+                }
+                presync_conflict_key_if_needed(
+                    &input,
+                    last_indicators,
+                    &mut framed,
+                    &mut active_stage,
+                    &mut image,
+                    &mut pending_rect,
+                ).await;
                 handle_rdp_input(input, &mut framed, &mut active_stage, &mut image,
-                    &mut cursor_x, &mut cursor_y, &mut pending_rect).await?;
+                    &mut input_db, &mut pending_rect).await?;
                 // Drain any additional inputs that arrived concurrently.
                 loop {
                     match rx_from_iced.try_recv() {
-                        Ok(inp) => handle_rdp_input(inp, &mut framed, &mut active_stage, &mut image,
-                            &mut cursor_x, &mut cursor_y, &mut pending_rect).await?,
+                        Ok(inp) => {
+                            if let ConnectionInput::SyncKeyboardIndicators(ind) = &inp {
+                                last_indicators = Some(*ind);
+                            }
+                            presync_conflict_key_if_needed(
+                                &inp,
+                                last_indicators,
+                                &mut framed,
+                                &mut active_stage,
+                                &mut image,
+                                &mut pending_rect,
+                            ).await;
+                            handle_rdp_input(inp, &mut framed, &mut active_stage, &mut image,
+                                &mut input_db, &mut pending_rect).await?;
+                        }
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => {
                             let _ = tx_from_worker.send(ConnectionEvent::Disconnected);
@@ -163,6 +204,12 @@ async fn run_rdp_worker_inner(
                     .map_err(|e| format!("active stage read failed: {}", e))?;
 
                 processed_pdus += 1;
+
+                // --- PDU trace -----------------------------------------------
+                match action {
+                    Action::X224 => log_x224_pdu(&mut pdu_log, processed_pdus, &payload),
+                    Action::FastPath => log_fastpath_pdu(&mut pdu_log, processed_pdus, &payload),
+                }
 
                 let outputs = match active_stage.process(&mut image, action, &payload) {
                     Ok(outputs) => outputs,
@@ -218,6 +265,29 @@ async fn run_rdp_worker_inner(
                             let _ = tx_from_worker.send(ConnectionEvent::Disconnected);
                             return Ok(());
                         }
+                        ActiveStageOutput::DeactivateAll(mut cas) => {
+                            let mut buf = WriteBuf::new();
+                            loop {
+                                if matches!(
+                                    cas.connection_activation_state(),
+                                    ConnectionActivationState::Finalized { .. }
+                                ) {
+                                    break;
+                                }
+                                single_sequence_step(&mut framed, &mut *cas, &mut buf)
+                                    .await
+                                    .map_err(|e| format!("reactivation step failed: {:?}", e))?;
+                            }
+                            // Session reactivated (e.g. login → desktop transition
+                            // on servers that send DeactivateAll, such as Windows RDS).
+                            eprintln!("[RDP] session reactivated");
+                            if let Some(ind) = last_indicators {
+                                sync_keyboard_indicators(
+                                    &mut framed, &mut active_stage, &mut image,
+                                    &mut pending_rect, ind, "reactivation",
+                                ).await;
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -236,14 +306,117 @@ async fn run_rdp_worker_inner(
     }
 }
 
+/// Sends a TS_SYNC_EVENT to synchronize local toggle-key states (NumLock, CapsLock, ScrollLock)
+/// to the remote server.
+async fn sync_keyboard_indicators(
+    framed: &mut UpgradedFramed,
+    active_stage: &mut ActiveStage,
+    image: &mut DecodedImage,
+    pending_rect: &mut Option<InclusiveRectangle>,
+    indicators: KeyboardIndicators,
+    reason: &str,
+) {
+    eprintln!(
+        "[RDP] sync_keyboard_indicators [{}]: NumLock={} CapsLock={} ScrollLock={}",
+        reason, indicators.num_lock, indicators.caps_lock, indicators.scroll_lock,
+    );
+    let ev = synchronize_event(
+        indicators.scroll_lock,
+        indicators.num_lock,
+        indicators.caps_lock,
+        false,
+    );
+    if let Ok(outputs) = active_stage.process_fastpath_input(image, &[ev]) {
+        for out in outputs {
+            if let ActiveStageOutput::ResponseFrame(frame) = out {
+                let _ = framed.write_all(&frame).await;
+            } else if let ActiveStageOutput::GraphicsUpdate(rect) = out {
+                *pending_rect = Some(match pending_rect.take() {
+                    Some(prev) => merge_rect(prev, rect),
+                    None => rect,
+                });
+            }
+        }
+    }
+}
+
+fn should_presync_keyboard_input(input: &ConnectionInput) -> bool {
+    matches!(
+        input,
+        ConnectionInput::RdpInput(RdpInput::KeyboardScancode {
+            code,
+            down: true,
+            ..
+        }) if is_numlock_conflict_scancode(*code)
+    )
+}
+
+async fn presync_conflict_key_if_needed(
+    input: &ConnectionInput,
+    last_indicators: Option<KeyboardIndicators>,
+    framed: &mut UpgradedFramed,
+    active_stage: &mut ActiveStage,
+    image: &mut DecodedImage,
+    pending_rect: &mut Option<InclusiveRectangle>,
+) {
+    if !should_presync_keyboard_input(input) {
+        return;
+    }
+
+    if let Some(indicators) = last_indicators {
+        sync_keyboard_indicators(
+            framed,
+            active_stage,
+            image,
+            pending_rect,
+            indicators,
+            "pre-keydown",
+        )
+        .await;
+    }
+}
+
+async fn process_fastpath_events(
+    framed: &mut UpgradedFramed,
+    active_stage: &mut ActiveStage,
+    image: &mut DecodedImage,
+    pending_rect: &mut Option<InclusiveRectangle>,
+    events: &[ironrdp::pdu::input::fast_path::FastPathInputEvent],
+) -> Result<(), String> {
+    if events.is_empty() {
+        return Ok(());
+    }
+
+    if let Ok(outputs) = active_stage.process_fastpath_input(image, events) {
+        for out in outputs {
+            match out {
+                ActiveStageOutput::ResponseFrame(frame) => {
+                    framed
+                        .write_all(&frame)
+                        .await
+                        .map_err(|e| format!("fastpath write failed: {}", e))?;
+                }
+                ActiveStageOutput::GraphicsUpdate(rect) => {
+                    *pending_rect = Some(match pending_rect.take() {
+                        Some(prev) => merge_rect(prev, rect),
+                        None => rect,
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Handle a single `ConnectionInput` event: write resize/fastpath PDUs to the RDP framed stream.
 async fn handle_rdp_input(
     input: ConnectionInput,
     framed: &mut UpgradedFramed,
     active_stage: &mut ActiveStage,
     image: &mut DecodedImage,
-    cursor_x: &mut u16,
-    cursor_y: &mut u16,
+    db: &mut Database,
     pending_rect: &mut Option<InclusiveRectangle>,
 ) -> Result<(), String> {
     match input {
@@ -259,33 +432,128 @@ async fn handle_rdp_input(
                 }
             }
         }
+        ConnectionInput::SyncKeyboardIndicators(indicators) => {
+            sync_keyboard_indicators(framed, active_stage, image, pending_rect, indicators, "user-sync").await;
+        }
+        ConnectionInput::ReleaseAllModifiers => {
+            for (code, extended) in [
+                (0x2A, false), // Left Shift
+                (0x36, false), // Right Shift
+                (0x1D, false), // Left Ctrl
+                (0x1D, true),  // Right Ctrl
+                (0x38, false), // Left Alt
+                (0x38, true),  // Right Alt
+                (0x5B, true),  // Left Super
+                (0x5C, true),  // Right Super
+            ] {
+                let sc = Scancode::from_u8(extended, code);
+                let events = db.apply([Operation::KeyReleased(sc)]);
+                process_fastpath_events(framed, active_stage, image, pending_rect, &events).await?;
+            }
+        }
         ConnectionInput::Data(_) => {}
         ConnectionInput::RdpInput(rdp_input) => {
-            let events = rdp_input_to_fastpath(rdp_input, cursor_x, cursor_y);
-            if !events.is_empty() {
-                if let Ok(outputs) = active_stage.process_fastpath_input(image, &events) {
-                    for out in outputs {
-                        match out {
-                            ActiveStageOutput::ResponseFrame(frame) => {
-                                framed
-                                    .write_all(&frame)
-                                    .await
-                                    .map_err(|e| format!("fastpath write failed: {}", e))?;
-                            }
-                            ActiveStageOutput::GraphicsUpdate(rect) => {
-                                *pending_rect = Some(match pending_rect.take() {
-                                    Some(prev) => merge_rect(prev, rect),
-                                    None => rect,
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
+            let op_opt: Option<Operation> = match rdp_input {
+                RdpInput::KeyboardScancode { code, extended, down } => {
+                    let sc = Scancode::from_u8(extended, code);
+                    Some(if down { Operation::KeyPressed(sc) } else { Operation::KeyReleased(sc) })
                 }
+                RdpInput::KeyboardUnicode { codepoint, down } => {
+                    char::from_u32(u32::from(codepoint)).map(|ch| {
+                        if down { Operation::UnicodeKeyPressed(ch) } else { Operation::UnicodeKeyReleased(ch) }
+                    })
+                }
+                RdpInput::MouseMove { x, y } => {
+                    Some(Operation::MouseMove(MousePosition { x, y }))
+                }
+                RdpInput::MouseButton { button, down } => {
+                    let mb = match button {
+                        RdpMouseButton::Left   => IrdpMouseButton::Left,
+                        RdpMouseButton::Right  => IrdpMouseButton::Right,
+                        RdpMouseButton::Middle => IrdpMouseButton::Middle,
+                    };
+                    Some(if down { Operation::MouseButtonPressed(mb) } else { Operation::MouseButtonReleased(mb) })
+                }
+                RdpInput::MouseWheel { delta } => {
+                    Some(Operation::WheelRotations(WheelRotations { is_vertical: true, rotation_units: delta }))
+                }
+                RdpInput::MouseHorizontalWheel { delta } => {
+                    Some(Operation::WheelRotations(WheelRotations { is_vertical: false, rotation_units: delta }))
+                }
+            };
+            if let Some(op) = op_opt {
+                let events = db.apply([op]);
+                process_fastpath_events(framed, active_stage, image, pending_rect, &events).await?;
             }
         }
     }
     Ok(())
+}
+
+/// Decode an X224 frame as far as possible and write a human-readable summary
+/// line (with timestamp) to `log`.  Never panics — decode failures are logged
+/// as raw hex so no PDU is ever silently dropped from the trace.
+fn log_x224_pdu(log: &mut std::fs::File, pdu_n: usize, frame: &[u8]) {
+    use std::time::SystemTime;
+    let ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+
+    // Try to decode as MCS SendDataIndication
+    let Ok(data_ctx) = rdp_connector::legacy::decode_send_data_indication(frame) else {
+        let _ = writeln!(log, "[{ts}] #{pdu_n} X224 <decode-fail: not SendDataIndication> raw={}", hex_head(frame, 32));
+        return;
+    };
+
+    let channel_id = data_ctx.channel_id;
+    let initiator_id = data_ctx.initiator_id;
+
+    let Ok(io_pdu) = rdp_connector::legacy::decode_io_channel(data_ctx) else {
+        let _ = writeln!(log, "[{ts}] #{pdu_n} X224 ch={channel_id} init={initiator_id} <not io-channel> raw={}", hex_head(frame, 32));
+        return;
+    };
+
+    match io_pdu {
+        rdp_connector::legacy::IoChannelPdu::DeactivateAll(_) => {
+            let _ = writeln!(log, "[{ts}] #{pdu_n} X224 ch={channel_id} ***DeactivateAll***");
+        }
+        rdp_connector::legacy::IoChannelPdu::Data(ctx) => {
+            let name = ctx.pdu.as_short_name();
+            let detail = match &ctx.pdu {
+                ShareDataPdu::SetKeyboardIndicators(raw) => {
+                    format!("***SetKeyboardIndicators*** raw={}", hex_head(raw, 8))
+                }
+                ShareDataPdu::SaveSessionInfo(_) => "SaveSessionInfo".to_string(),
+                ShareDataPdu::ServerSetErrorInfo(e) => format!("ServerSetErrorInfo {:?}", e),
+                other => other.as_short_name().to_string(),
+            };
+            let _ = writeln!(log, "[{ts}] #{pdu_n} X224 ch={channel_id} {name} {detail}");
+        }
+    }
+}
+
+fn log_fastpath_pdu(log: &mut std::fs::File, pdu_n: usize, frame: &[u8]) {
+    let ts = now_millis();
+    let _ = writeln!(
+        log,
+        "[{ts}] #{pdu_n} FastPath len={} raw={}",
+        frame.len(),
+        hex_head(frame, 24)
+    );
+}
+
+fn now_millis() -> u128 {
+    use std::time::SystemTime;
+
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+fn hex_head(data: &[u8], n: usize) -> String {
+    data.iter().take(n).map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
 }
 
 fn try_handle_slowpath_bitmap(frame: &[u8]) -> Vec<FrameUpdate> {
@@ -546,63 +814,6 @@ fn rect_update_from_image(image: &DecodedImage, rect: InclusiveRectangle) -> Opt
     })
 }
 
-fn rdp_input_to_fastpath(input: RdpInput, cursor_x: &mut u16, cursor_y: &mut u16) -> Vec<FastPathInputEvent> {
-    match input {
-        RdpInput::KeyboardScancode { code, extended, down } => {
-            let mut flags = KeyboardFlags::empty();
-            if !down {
-                flags |= KeyboardFlags::RELEASE;
-            }
-            if extended {
-                flags |= KeyboardFlags::EXTENDED;
-            }
-            vec![FastPathInputEvent::KeyboardEvent(flags, code)]
-        }
-        RdpInput::KeyboardUnicode { codepoint, down } => {
-            let mut flags = KeyboardFlags::empty();
-            if !down {
-                flags |= KeyboardFlags::RELEASE;
-            }
-            vec![FastPathInputEvent::UnicodeKeyboardEvent(flags, codepoint)]
-        }
-        RdpInput::MouseMove { x, y } => {
-            *cursor_x = x;
-            *cursor_y = y;
-            vec![FastPathInputEvent::MouseEvent(MousePdu {
-                flags: PointerFlags::MOVE,
-                number_of_wheel_rotation_units: 0,
-                x_position: x,
-                y_position: y,
-            })]
-        }
-        RdpInput::MouseButton { button, down } => {
-            let mut flags = match button {
-                RdpMouseButton::Left => PointerFlags::LEFT_BUTTON,
-                RdpMouseButton::Right => PointerFlags::RIGHT_BUTTON,
-                RdpMouseButton::Middle => PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
-            };
-            if down {
-                flags |= PointerFlags::DOWN;
-            }
-
-            vec![FastPathInputEvent::MouseEvent(MousePdu {
-                flags,
-                number_of_wheel_rotation_units: 0,
-                x_position: *cursor_x,
-                y_position: *cursor_y,
-            })]
-        }
-        RdpInput::MouseWheel { delta } => {
-            vec![FastPathInputEvent::MouseEvent(MousePdu {
-                flags: PointerFlags::VERTICAL_WHEEL | PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
-                number_of_wheel_rotation_units: delta,
-                x_position: *cursor_x,
-                y_position: *cursor_y,
-            })]
-        }
-    }
-}
-
 type UpgradedFramed = Framed<MovableTokioStream<ironrdp_tls::TlsStream<tokio::net::TcpStream>>>;
 
 async fn connect(
@@ -669,7 +880,7 @@ fn build_config(username: String, password: String, domain: Option<String>) -> c
         credentials: Credentials::UsernamePassword { username, password },
         domain,
         enable_tls: true,
-        enable_credssp: false,
+        enable_credssp: true,
         keyboard_type: KeyboardType::IbmEnhanced,
         keyboard_subtype: 0,
         keyboard_layout: 0,
@@ -678,7 +889,7 @@ fn build_config(username: String, password: String, domain: Option<String>) -> c
         dig_product_id: String::new(),
         desktop_size: connector::DesktopSize {
             width: 1280,
-            height: 1024,
+            height: 720,
         },
         bitmap: Some(BitmapConfig {
             lossy_compression: false,

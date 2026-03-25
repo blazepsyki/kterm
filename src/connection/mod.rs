@@ -5,6 +5,7 @@ pub mod ssh;
 pub mod telnet;
 pub mod serial;
 pub mod rdp;
+pub mod rdp_input_policy;
 
 use crate::remote_display::FrameUpdate;
 use tokio::sync::mpsc;
@@ -31,6 +32,9 @@ pub enum RdpInput {
     MouseWheel {
         delta: i16,
     },
+    MouseHorizontalWheel {
+        delta: i16,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +42,13 @@ pub enum RdpMouseButton {
     Left,
     Right,
     Middle,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct KeyboardIndicators {
+    pub scroll_lock: bool,
+    pub num_lock: bool,
+    pub caps_lock: bool,
 }
 
 pub enum ConnectionEvent {
@@ -52,6 +63,8 @@ pub enum ConnectionEvent {
 pub enum ConnectionInput {
     Data(Vec<u8>),
     Resize { cols: u16, rows: u16 },
+    SyncKeyboardIndicators(KeyboardIndicators),
+    ReleaseAllModifiers,
     RdpInput(RdpInput),
 }
 
