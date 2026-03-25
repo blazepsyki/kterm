@@ -9,6 +9,7 @@ use ironrdp::connector;
 use ironrdp::connector::{BitmapConfig, ConnectionResult, Credentials};
 use ironrdp::graphics::image_processing::PixelFormat;
 use ironrdp::pdu::geometry::{InclusiveRectangle, Rectangle};
+use ironrdp::pdu::fast_path::{FastPathHeader, FastPathUpdate, FastPathUpdatePdu, Fragmentation, UpdateCode};
 use ironrdp::pdu::gcc::KeyboardType;
 use ironrdp::pdu::rdp::capability_sets::{MajorPlatformType, BitmapCodecs, Codec, CodecProperty, NsCodec};
 use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
@@ -35,6 +36,8 @@ use ironrdp_input::{
 use crate::connection::{ConnectionEvent, ConnectionInput, KeyboardIndicators, RdpInput, RdpMouseButton};
 use crate::connection::rdp_input_policy::is_numlock_conflict_scancode;
 use crate::remote_display::FrameUpdate;
+
+const NSCODEC_CODEC_ID: u8 = 1;
 
 pub fn connect_and_subscribe(
     host: String,
@@ -141,6 +144,7 @@ async fn run_rdp_worker_inner(
     let mut pending_rect: Option<InclusiveRectangle> = None;
     let mut input_db = Database::new();
     let mut last_indicators: Option<KeyboardIndicators> = None;
+    let mut fastpath_surface_fragments: Option<Vec<u8>> = None;
 
     let summary = format!(
         "\r\n[RDP] IronRDP handshake completed: server={} port={} desktop={}x{}\r\n",
@@ -211,6 +215,12 @@ async fn run_rdp_worker_inner(
                     Action::FastPath => log_fastpath_pdu(&mut pdu_log, processed_pdus, &payload),
                 }
 
+                let mirrored_surface_update = if action == Action::FastPath {
+                    mirror_fastpath_surface_update(&payload, &mut fastpath_surface_fragments)
+                } else {
+                    None
+                };
+
                 let outputs = match active_stage.process(&mut image, action, &payload) {
                     Ok(outputs) => outputs,
                     Err(e) => {
@@ -221,6 +231,13 @@ async fn run_rdp_worker_inner(
                             if !frame_updates.is_empty() {
                                 let _ = tx_from_worker.send(ConnectionEvent::Frames(frame_updates));
                             }
+                        } else if let Some(surface_data) = mirrored_surface_update.as_deref() {
+                            let frame_updates = try_handle_nscodec_surface_commands(surface_data);
+                            if !frame_updates.is_empty() {
+                                let _ = tx_from_worker.send(ConnectionEvent::Frames(frame_updates));
+                                continue;
+                            }
+                            eprintln!("[RDP] unhandled PDU #{}: {:?} ({})", processed_pdus, action, e);
                         } else {
                             eprintln!("[RDP] unhandled PDU #{}: {:?} ({})", processed_pdus, action, e);
                         }
@@ -554,6 +571,294 @@ fn now_millis() -> u128 {
 
 fn hex_head(data: &[u8], n: usize) -> String {
     data.iter().take(n).map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
+}
+
+fn mirror_fastpath_surface_update(frame: &[u8], fragmented_data: &mut Option<Vec<u8>>) -> Option<Vec<u8>> {
+    let mut cursor = ReadCursor::new(frame);
+    let _header = FastPathHeader::decode(&mut cursor).ok()?;
+    let update_pdu = FastPathUpdatePdu::decode(&mut cursor).ok()?;
+
+    if !matches!(update_pdu.update_code, UpdateCode::SurfaceCommands) {
+        return None;
+    }
+
+    match update_pdu.fragmentation {
+        Fragmentation::Single => {
+            if fragmented_data.is_some() {
+                *fragmented_data = None;
+            }
+            Some(update_pdu.data.to_vec())
+        }
+        Fragmentation::First => {
+            *fragmented_data = Some(update_pdu.data.to_vec());
+            None
+        }
+        Fragmentation::Next => {
+            if let Some(existing) = fragmented_data.as_mut() {
+                existing.extend_from_slice(update_pdu.data);
+            } else {
+                *fragmented_data = None;
+            }
+            None
+        }
+        Fragmentation::Last => {
+            let mut completed = fragmented_data.take()?;
+            completed.extend_from_slice(update_pdu.data);
+            Some(completed)
+        }
+    }
+}
+
+fn try_handle_nscodec_surface_commands(surface_data: &[u8]) -> Vec<FrameUpdate> {
+    let mut updates = Vec::new();
+
+    let Ok(FastPathUpdate::SurfaceCommands(commands)) =
+        FastPathUpdate::decode_with_code(surface_data, UpdateCode::SurfaceCommands)
+    else {
+        return updates;
+    };
+
+    for command in commands {
+        let bits = match command {
+            ironrdp::pdu::surface_commands::SurfaceCommand::SetSurfaceBits(bits)
+            | ironrdp::pdu::surface_commands::SurfaceCommand::StreamSurfaceBits(bits) => bits,
+            ironrdp::pdu::surface_commands::SurfaceCommand::FrameMarker(_) => continue,
+        };
+
+        if bits.extended_bitmap_data.codec_id != NSCODEC_CODEC_ID {
+            continue;
+        }
+
+        let width = usize::from(bits.extended_bitmap_data.width);
+        let height = usize::from(bits.extended_bitmap_data.height);
+        if width == 0 || height == 0 {
+            continue;
+        }
+
+        let Some(decoded_rgba) = decode_nscodec_bitmap(
+            bits.extended_bitmap_data.data,
+            width,
+            height,
+        ) else {
+            continue;
+        };
+
+        let rect_w = bits.destination.width() as usize;
+        let rect_h = bits.destination.height() as usize;
+        if rect_w == 0 || rect_h == 0 {
+            continue;
+        }
+
+        let rgba = if rect_w == width && rect_h == height {
+            decoded_rgba
+        } else {
+            crop_rgba_top_down(&decoded_rgba, width, height, rect_w, rect_h)
+        };
+
+        updates.push(FrameUpdate::Rect {
+            x: bits.destination.left,
+            y: bits.destination.top,
+            width: bits.destination.width(),
+            height: bits.destination.height(),
+            rgba,
+        });
+    }
+
+    updates
+}
+
+fn decode_nscodec_bitmap(data: &[u8], width: usize, height: usize) -> Option<Vec<u8>> {
+    if data.len() < 20 {
+        return None;
+    }
+
+    let luma_plane_len = u32::from_le_bytes(data[0..4].try_into().ok()?) as usize;
+    let orange_chroma_plane_len = u32::from_le_bytes(data[4..8].try_into().ok()?) as usize;
+    let green_chroma_plane_len = u32::from_le_bytes(data[8..12].try_into().ok()?) as usize;
+    let alpha_plane_len = u32::from_le_bytes(data[12..16].try_into().ok()?) as usize;
+    let color_loss_level = data[16];
+    let chroma_subsampling_level = data[17];
+
+    if !(1..=7).contains(&color_loss_level) {
+        return None;
+    }
+
+    let rounded_width = round_up_to(width, 8);
+    let rounded_height = round_up_to(height, 2);
+    let uses_subsampling = chroma_subsampling_level != 0;
+
+    let y_plane_size = if uses_subsampling {
+        rounded_width.checked_mul(height)?
+    } else {
+        width.checked_mul(height)?
+    };
+    let chroma_plane_size = if uses_subsampling {
+        (rounded_width / 2).checked_mul(rounded_height / 2)?
+    } else {
+        width.checked_mul(height)?
+    };
+    let alpha_plane_size = width.checked_mul(height)?;
+
+    let plane_lengths = [
+        luma_plane_len,
+        orange_chroma_plane_len,
+        green_chroma_plane_len,
+        alpha_plane_len,
+    ];
+    let plane_sizes = [
+        y_plane_size,
+        chroma_plane_size,
+        chroma_plane_size,
+        alpha_plane_size,
+    ];
+
+    let total_plane_len = plane_lengths.iter().try_fold(0usize, |acc, len| acc.checked_add(*len))?;
+    if data.len() < 20 + total_plane_len {
+        return None;
+    }
+
+    let mut cursor = 20usize;
+    let mut planes = Vec::with_capacity(4);
+    for (&encoded_len, &decoded_len) in plane_lengths.iter().zip(plane_sizes.iter()) {
+        let end = cursor.checked_add(encoded_len)?;
+        let encoded_plane = data.get(cursor..end)?;
+        let decoded_plane = decode_nscodec_plane(encoded_plane, encoded_len, decoded_len)?;
+        planes.push(decoded_plane);
+        cursor = end;
+    }
+
+    let y_plane = &planes[0];
+    let co_plane = &planes[1];
+    let cg_plane = &planes[2];
+    let a_plane = &planes[3];
+    let chroma_shift = color_loss_level - 1;
+
+    let mut rgba = vec![0u8; width.checked_mul(height)?.checked_mul(4)?];
+    for y in 0..height {
+        let y_row = if uses_subsampling { y * rounded_width } else { y * width };
+        let chroma_row = if uses_subsampling {
+            (y / 2) * (rounded_width / 2)
+        } else {
+            y * width
+        };
+        let alpha_row = y * width;
+        for x in 0..width {
+            let y_value = i16::from(*y_plane.get(y_row + x)?);
+            let chroma_index = chroma_row + if uses_subsampling { x / 2 } else { x };
+            let co = ((*co_plane.get(chroma_index)? as i8) as i16) << chroma_shift;
+            let cg = ((*cg_plane.get(chroma_index)? as i8) as i16) << chroma_shift;
+            let alpha = *a_plane.get(alpha_row + x)?;
+
+            let t = y_value - cg;
+            let r = clamp_i16_to_u8(t + co);
+            let g = clamp_i16_to_u8(y_value + cg);
+            let b = clamp_i16_to_u8(t - co);
+
+            let dst = (alpha_row + x) * 4;
+            rgba[dst] = r;
+            rgba[dst + 1] = g;
+            rgba[dst + 2] = b;
+            rgba[dst + 3] = alpha;
+        }
+    }
+
+    Some(rgba)
+}
+
+fn decode_nscodec_plane(encoded: &[u8], encoded_len: usize, decoded_len: usize) -> Option<Vec<u8>> {
+    if decoded_len == 0 {
+        return Some(Vec::new());
+    }
+
+    if encoded_len == 0 {
+        return Some(vec![0xFF; decoded_len]);
+    }
+
+    if encoded_len < decoded_len {
+        nscodec_rle_decode(encoded, decoded_len)
+    } else {
+        Some(encoded.get(..decoded_len)?.to_vec())
+    }
+}
+
+fn nscodec_rle_decode(encoded: &[u8], decoded_len: usize) -> Option<Vec<u8>> {
+    if decoded_len < 4 {
+        return None;
+    }
+
+    let mut src = 0usize;
+    let mut out = Vec::with_capacity(decoded_len);
+
+    while decoded_len - out.len() > 4 {
+        let value = *encoded.get(src)?;
+        src += 1;
+
+        if decoded_len - out.len() == 5 {
+            out.push(value);
+            continue;
+        }
+
+        let next = *encoded.get(src)?;
+        if value == next {
+            src += 1;
+            let marker = *encoded.get(src)?;
+            let run_len = if marker < 0xFF {
+                src += 1;
+                usize::from(marker) + 2
+            } else {
+                let len_bytes: [u8; 4] = encoded.get(src + 1..src + 5)?.try_into().ok()?;
+                src += 5;
+                u32::from_le_bytes(len_bytes) as usize
+            };
+
+            if out.len() + run_len > decoded_len {
+                return None;
+            }
+            out.resize(out.len() + run_len, value);
+        } else {
+            out.push(value);
+        }
+    }
+
+    let tail = encoded.get(src..src + 4)?;
+    out.extend_from_slice(tail);
+    if out.len() != decoded_len {
+        return None;
+    }
+
+    Some(out)
+}
+
+fn crop_rgba_top_down(rgba: &[u8], src_w: usize, src_h: usize, rect_w: usize, rect_h: usize) -> Vec<u8> {
+    let copy_w = rect_w.min(src_w);
+    let copy_h = rect_h.min(src_h);
+    let mut cropped = vec![0u8; rect_w * rect_h * 4];
+    for y in 0..copy_h {
+        let src_row = y * src_w * 4;
+        let dst_row = y * rect_w * 4;
+        let row_bytes = copy_w * 4;
+        if src_row + row_bytes <= rgba.len() && dst_row + row_bytes <= cropped.len() {
+            cropped[dst_row..dst_row + row_bytes].copy_from_slice(&rgba[src_row..src_row + row_bytes]);
+        }
+    }
+    cropped
+}
+
+fn round_up_to(value: usize, multiple: usize) -> usize {
+    if multiple == 0 {
+        return value;
+    }
+
+    let remainder = value % multiple;
+    if remainder == 0 {
+        value
+    } else {
+        value + (multiple - remainder)
+    }
+}
+
+fn clamp_i16_to_u8(value: i16) -> u8 {
+    u8::try_from(value.clamp(0, 255)).unwrap_or(0)
 }
 
 fn try_handle_slowpath_bitmap(frame: &[u8]) -> Vec<FrameUpdate> {

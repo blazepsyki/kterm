@@ -494,16 +494,21 @@ IronRDP 생태계의 그래픽 코덱 지원 현황:
 | **AVC PDU 구조** | `ironrdp-pdu::gfx::Avc420BitmapStream`, `Avc444BitmapStream` | H.264 비트스트림 파싱만 — **디코딩은 외부 라이브러리 필요** |
 | **DVC 인프라** | `ironrdp-dvc` | `DvcProcessor` 트레이트 — GFX 채널 프로세서 직접 구현 필요 |
 
-### 단계 R9-A: NSCodec 디코딩 구현 (독립 — DVC 불필요)
+### 단계 R9-A: NSCodec 디코딩 구현 (독립 — DVC 불필요, 기본 구현 완료)
 
 > 현재 `build_config()`에서 NSCodec을 협상하지만 디코딩 코드가 없어 서버가 NSCodec으로 전송 시 **화면 깨짐 발생 가능**
 
-1. **즉시 조치 (NSCodec 협상 제거 또는 디코딩 추가)**:
-   - **옵션 A**: `build_config()`에서 NSCodec 코덱 등록 제거 (가장 안전, 서버가 RLE/RDP6 폴백)
-   - **옵션 B**: MS-RDPNSC 스펙 기반 NSCodec 디코더 직접 구현
-     - NSCODEC = 3개 채널(Y, Cb, Cr) + ChromaSubsampling + ColorLossLevel 기반 디코딩
-     - `ironrdp-graphics`에 `nscodec` 모듈 추가 또는 kterm 자체 구현
-2. **검증**: NSCodec 전용 서버 설정에서 화면 깨짐 없음 확인
+1. **구현 상태**:
+   - `kterm` 측에 MS-RDPNSC 기반 NSCodec fallback 디코더를 직접 추가함.
+   - `Action::FastPath` 프레임을 미러링해 `SurfaceCommands`를 별도로 재파싱하고, IronRDP `active_stage.process()`가 NSCodec `codec_id=1`을 처리하지 못해 실패할 때 kterm이 직접 복구하도록 구성함.
+   - `SetSurfaceBits` / `StreamSurfaceBits`에서 NSCodec payload를 추출하고, fragmented fast-path `SurfaceCommands` 데이터도 재조립함.
+   - NSCodec 메시지의 plane length/header 파싱, plane RLE 해제, YCoCg + ColorLossLevel 보정, RGBA 변환까지 구현함.
+2. **현재 한계**:
+   - 실서버 기반 NSCodec 강제 환경 검증은 아직 완료하지 못함.
+   - fallback 경로는 화면 복구를 우선 해결한 상태이며, NSCodec 경로의 `FrameMarker` ack 필요 여부는 실제 서버 상호운용성 확인 후 추가 정리 가능.
+3. **남은 검증**:
+   - NSCodec 전용 서버 설정에서 화면 깨짐/무갱신이 없는지 확인
+   - 장시간 세션에서 frame ack 누락 경고나 성능 저하가 없는지 확인
 
 ### 단계 R9-B: EGFX DVC 채널 프로세서 구축 (핵심)
 
@@ -656,7 +661,7 @@ pub enum ConnectionEvent {
 | ~~`ironrdp-tokio` API가 `ironrdp-blocking`과 크게 다를 수 있음~~ | ~~R1 지연~~ | ~~IronRDP GitHub 예제 코드 참조, 점진적 마이그레이션~~ | ✅ R1 완료 |
 | ~~`ironrdp-tls` rustls feature와 기존 `tokio-rustls` 버전 충돌~~ | ~~R2 빌드 실패~~ | ~~`cargo tree` 의존성 트리 사전 검증~~ | ✅ R2 완료 |
 | ~~비동기 전환 중 기존 프레임 배치/스로틀 로직 깨짐~~ | ~~R1~~ | ~~기존 타이머 로직을 `tokio::time::interval`로 1:1 이식 후 개선~~ | ✅ R1 완료 |
-| NSCodec 협상하지만 디코딩 코드 없음 | 잠재적 화면 깨짐 (서버가 NSCodec 전송 시) | R9-A에서 즉시 수정 — 협상 제거(안전) 또는 디코더 직접 구현 | ⚠️ 현재 버그 |
+| NSCodec 협상하지만 디코딩 코드 없음 | 잠재적 화면 깨짐 (서버가 NSCodec 전송 시) | kterm fallback NSCodec 디코더 구현으로 1차 완화. 실서버 검증 및 ack 보완 여부 확인 필요 | 부분 완화 |
 | EGFX GFX 프로세서가 IronRDP에 전용 크레이트 없음 | R9-B 구현량 증가 | `ironrdp-pdu` GFX PDU + `ironrdp-graphics` 기본 요소 조합, `DvcProcessor` 트레이트 구현 | R9-B |
 | ClearCodec / Planar 코덱 IronRDP에 디코더 없음 | R9-B 일부 코덱 미지원 | MS-RDPEGFX 스펙 직접 구현. 미지원 코덱은 warn 후 skip | R9-B |
 | OpenH264 빌드 시 C 컴파일러 필요 | CI/크로스컴파일 환경 빌드 실패 | `source` feature 비활성화 후 시스템 OpenH264 링크 옵션 제공 | R9-C |
@@ -677,7 +682,7 @@ pub enum ConnectionEvent {
 | R6 | 로컬 파일 원격 열기/저장 | 미완 |
 | R7 | NLA 활성 서버 접속, 인증서 검증 경고 표시 | 미완 |
 | R8 | 탭 닫기 후 메모리 누수 없음, 네트워크 끊김 후 재접속 | 미완 |
-| R9-A | NSCodec 협상 제거 또는 디코더 추가 후 표준 서버에서 화면 깨짐 없음 확인 | 미완 |
+| R9-A | NSCodec fallback 디코더 구현 완료, 표준/강제 NSCodec 서버 검증 및 장시간 세션 확인 필요 | 구현 완료, 검증 미완 |
 | R9-B | EGFX GFX 채널 연결 후 Win10/11 서버에서 RemoteFX Progressive / ClearCodec 화면 정상 표시 | 미완 |
 | R9-C | H.264 AVC420/AVC444로 동영상 재생 시 화면 정상 출력 및 성능 측정 | 미완 |
 
