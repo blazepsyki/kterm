@@ -191,10 +191,18 @@ struct State {
     rdp_pass: String,
     local_shells: Vec<LocalShellOption>,
     selected_local_shell: usize,
-    id_host: Id,
-    id_port: Id,
-    id_user: Id,
-    id_pass: Id,
+    ssh_id_host: Id,
+    ssh_id_port: Id,
+    ssh_id_user: Id,
+    ssh_id_pass: Id,
+    telnet_id_host: Id,
+    telnet_id_port: Id,
+    serial_id_port: Id,
+    serial_id_baud: Id,
+    rdp_id_host: Id,
+    rdp_id_port: Id,
+    rdp_id_user: Id,
+    rdp_id_pass: Id,
     focused_field: usize,
     pub window_id: Option<window::Id>,
     pub dummy_menu_open: Option<&'static str>,
@@ -222,15 +230,51 @@ impl Default for State {
             rdp_pass: "".to_string(),
             local_shells,
             selected_local_shell: 0,
-            id_host: Id::new("host"),
-            id_port: Id::new("port"),
-            id_user: Id::new("user"),
-            id_pass: Id::new("pass"),
+            ssh_id_host: Id::new("ssh_host"),
+            ssh_id_port: Id::new("ssh_port"),
+            ssh_id_user: Id::new("ssh_user"),
+            ssh_id_pass: Id::new("ssh_pass"),
+            telnet_id_host: Id::new("telnet_host"),
+            telnet_id_port: Id::new("telnet_port"),
+            serial_id_port: Id::new("serial_port"),
+            serial_id_baud: Id::new("serial_baud"),
+            rdp_id_host: Id::new("rdp_host"),
+            rdp_id_port: Id::new("rdp_port"),
+            rdp_id_user: Id::new("rdp_user"),
+            rdp_id_pass: Id::new("rdp_pass"),
             focused_field: 0,
             window_id: None,
             dummy_menu_open: None,
             resizing_direction: None,
             window_size: (1024.0, 768.0),
+        }
+    }
+}
+
+impl State {
+    fn current_field_ids(&self) -> Vec<Id> {
+        match self.welcome_protocol {
+            ProtocolMode::Ssh => vec![
+                self.ssh_id_host.clone(),
+                self.ssh_id_port.clone(),
+                self.ssh_id_user.clone(),
+                self.ssh_id_pass.clone(),
+            ],
+            ProtocolMode::Telnet => vec![
+                self.telnet_id_host.clone(),
+                self.telnet_id_port.clone(),
+            ],
+            ProtocolMode::Serial => vec![
+                self.serial_id_port.clone(),
+                self.serial_id_baud.clone(),
+            ],
+            ProtocolMode::Rdp => vec![
+                self.rdp_id_host.clone(),
+                self.rdp_id_port.clone(),
+                self.rdp_id_user.clone(),
+                self.rdp_id_pass.clone(),
+            ],
+            ProtocolMode::Local => vec![],
         }
     }
 }
@@ -434,7 +478,12 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::RdpPortChanged(s) => { state.rdp_port = s; Task::none() }
         Message::RdpUserChanged(s) => { state.rdp_user = s; Task::none() }
         Message::RdpPassChanged(s) => { state.rdp_pass = s; Task::none() }
-        Message::SelectProtocol(mode) => { state.welcome_protocol = mode; Task::none() }
+        Message::SelectProtocol(mode) => {
+            state.welcome_protocol = mode;
+            state.focused_field = 0;
+            let fields = state.current_field_ids();
+            if let Some(first) = fields.first() { focus(first.clone()) } else { Task::none() }
+        }
         Message::SelectLocalShell(index) => {
             if index < state.local_shells.len() {
                 state.selected_local_shell = index;
@@ -644,10 +693,12 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::TabPressed(shift) => {
-            if shift { state.focused_field = if state.focused_field == 0 { 3 } else { state.focused_field - 1 }; }
-            else { state.focused_field = (state.focused_field + 1) % 4; }
-            let target_id = match state.focused_field { 0 => state.id_host.clone(), 1 => state.id_port.clone(), 2 => state.id_user.clone(), _ => state.id_pass.clone() };
-            focus(target_id)
+            let fields = state.current_field_ids();
+            if fields.is_empty() { return Task::none(); }
+            let count = fields.len();
+            if shift { state.focused_field = if state.focused_field == 0 { count - 1 } else { state.focused_field - 1 }; }
+            else { state.focused_field = (state.focused_field + 1) % count; }
+            focus(fields[state.focused_field].clone())
         }
         Message::FieldFocused(index) => { state.focused_field = index; Task::none() }
         Message::WindowIdCaptured(id) => { if state.window_id.is_none() { state.window_id = Some(id); } Task::none() }
@@ -1104,26 +1155,26 @@ fn view(state: &State) -> Element<'_, Message> {
                     ProtocolMode::Ssh => column![
                         text("SSH Connection").size(20).font(Font { weight: Weight::Bold, ..Default::default() }),
                         hr(),
-                        row![text("Host: ").width(100), text_input("IP Address", &state.ssh_host).id(state.id_host.clone()).on_input(Message::HostChanged).width(300)],
-                        row![text("Port: ").width(100), text_input("22", &state.ssh_port).id(state.id_port.clone()).on_input(Message::PortChanged).width(150)],
-                        row![text("Username: ").width(100), text_input("user", &state.ssh_user).id(state.id_user.clone()).on_input(Message::UserChanged).width(300)],
-                        row![text("Password: ").width(100), text_input("pass", &state.ssh_pass).id(state.id_pass.clone()).on_input(Message::PassChanged).secure(true).width(300).on_submit(Message::ConnectSsh)],
+                        row![text("Host: ").width(100), text_input("IP Address", &state.ssh_host).id(state.ssh_id_host.clone()).on_input(Message::HostChanged).width(300)],
+                        row![text("Port: ").width(100), text_input("22", &state.ssh_port).id(state.ssh_id_port.clone()).on_input(Message::PortChanged).width(150)],
+                        row![text("Username: ").width(100), text_input("user", &state.ssh_user).id(state.ssh_id_user.clone()).on_input(Message::UserChanged).width(300)],
+                        row![text("Password: ").width(100), text_input("pass", &state.ssh_pass).id(state.ssh_id_pass.clone()).on_input(Message::PassChanged).secure(true).width(300).on_submit(Message::ConnectSsh)],
                         Space::new().height(Length::Fixed(10.0)),
                         button(container(text("Connect")).center_x(Length::Fill).center_y(Length::Fill)).padding(12).width(Length::Fill).style(button::primary).on_press(Message::ConnectSsh)
                     ].spacing(15).into(),
                     ProtocolMode::Telnet => column![
                         text("Telnet Connection").size(20).font(Font { weight: Weight::Bold, ..Default::default() }),
                         hr(),
-                        row![text("Host: ").width(100), text_input("IP Address", &state.ssh_host).on_input(Message::HostChanged).width(300)],
-                        row![text("Port: ").width(100), text_input("23", &state.ssh_port).on_input(Message::PortChanged).width(150).on_submit(Message::ConnectTelnet)],
+                        row![text("Host: ").width(100), text_input("IP Address", &state.ssh_host).id(state.telnet_id_host.clone()).on_input(Message::HostChanged).width(300)],
+                        row![text("Port: ").width(100), text_input("23", &state.ssh_port).id(state.telnet_id_port.clone()).on_input(Message::PortChanged).width(150).on_submit(Message::ConnectTelnet)],
                         Space::new().height(Length::Fixed(10.0)),
                         button(container(text("Connect")).center_x(Length::Fill).center_y(Length::Fill)).padding(12).width(Length::Fill).style(button::primary).on_press(Message::ConnectTelnet)
                     ].spacing(15).into(),
                     ProtocolMode::Serial => column![
                         text("Serial Connection").size(20).font(Font { weight: Weight::Bold, ..Default::default() }),
                         hr(),
-                        row![text("COM Port: ").width(100), text_input("COM1", &state.serial_port).on_input(Message::SerialPortChanged).width(300)],
-                        row![text("Baud Rate: ").width(100), text_input("115200", &state.serial_baud).on_input(Message::SerialBaudChanged).width(150).on_submit(Message::ConnectSerial)],
+                        row![text("COM Port: ").width(100), text_input("COM1", &state.serial_port).id(state.serial_id_port.clone()).on_input(Message::SerialPortChanged).width(300)],
+                        row![text("Baud Rate: ").width(100), text_input("115200", &state.serial_baud).id(state.serial_id_baud.clone()).on_input(Message::SerialBaudChanged).width(150).on_submit(Message::ConnectSerial)],
                         Space::new().height(Length::Fixed(10.0)),
                         button(container(text("Connect")).center_x(Length::Fill).center_y(Length::Fill)).padding(12).width(Length::Fill).style(button::primary).on_press(Message::ConnectSerial)
                     ].spacing(15).into(),
@@ -1152,10 +1203,10 @@ fn view(state: &State) -> Element<'_, Message> {
                     ProtocolMode::Rdp => column![
                         text("RDP Connection").size(20).font(Font { weight: Weight::Bold, ..Default::default() }),
                         hr(),
-                        row![text("Host: ").width(100), text_input("IP Address", &state.rdp_host).on_input(Message::RdpHostChanged).width(300)],
-                        row![text("Port: ").width(100), text_input("3389", &state.rdp_port).on_input(Message::RdpPortChanged).width(150)],
-                        row![text("Username: ").width(100), text_input("user", &state.rdp_user).on_input(Message::RdpUserChanged).width(300)],
-                        row![text("Password: ").width(100), text_input("pass", &state.rdp_pass).on_input(Message::RdpPassChanged).secure(true).width(300).on_submit(Message::ConnectRdp)],
+                        row![text("Host: ").width(100), text_input("IP Address", &state.rdp_host).id(state.rdp_id_host.clone()).on_input(Message::RdpHostChanged).width(300)],
+                        row![text("Port: ").width(100), text_input("3389", &state.rdp_port).id(state.rdp_id_port.clone()).on_input(Message::RdpPortChanged).width(150)],
+                        row![text("Username: ").width(100), text_input("user", &state.rdp_user).id(state.rdp_id_user.clone()).on_input(Message::RdpUserChanged).width(300)],
+                        row![text("Password: ").width(100), text_input("pass", &state.rdp_pass).id(state.rdp_id_pass.clone()).on_input(Message::RdpPassChanged).secure(true).width(300).on_submit(Message::ConnectRdp)],
                         Space::new().height(Length::Fixed(10.0)),
                         button(container(text("Connect")).center_x(Length::Fill).center_y(Length::Fill)).padding(12).width(Length::Fill).style(button::primary).on_press(Message::ConnectRdp)
                     ].spacing(15).into(),
