@@ -22,8 +22,8 @@
 | RLE 24bpp (BGR24) 디코딩 | `ironrdp::graphics::rle` |
 | 비압축 32bpp BGRX 디코딩 | |
 | 비압축 16bpp RGB565 디코딩 | |
-| NSCodec 코덱 협상 | `BitmapCodecs`에 NSCodec 등록 — ⚠️ **디코딩 미구현** (서버가 NSCodec으로 전송 시 화면 깨짐 가능) |
-| RemoteFX (SurfaceCommands 경유) | `ironrdp-session`의 `CODEC_ID_REMOTEFX` → `rfx::DecodingContext` (DWT+RLGR+양자화+서브밴드 재구성) — **자동 처리** |
+| NSCodec 코덱 협상 | `BitmapCodecs`에 NSCodec 등록 — ⚠️ **디코딩 미구현** (서버가 NSCodec으로 전송 시 화면 깨짐 가능). IronRDP에서 **NSCodec 디코딩 추가 중** — 공식 릴리스 후 즉시 통합 예정 |
+| RemoteFX (SurfaceCommands 경유) | `ironrdp-session`의 `CODEC_ID_REMOTEFX` → `rfx::DecodingContext` (DWT+RLGR+양자화+서브밴드 재구성) — **기본 지원, 자동 처리** |
 | Dirty Rect 단위 부분 업데이트 | Arc CoW 버퍼 + GPU 부분 텍스처 업로드 |
 | 프레임 배치 병합 | ≈60fps 상한, 16ms/50ms 이중 타이머 |
 | wgpu GPU 텍스처 렌더러 | WGSL 쉐이더, 뷰포트 스케일링 |
@@ -70,13 +70,13 @@
 | 항목 | 비고 |
 |------|------|
 | 창 리사이즈 → 원격 해상도 동기화 | `encode_resize` 코드 존재하나 UI 이벤트 연동 미완 |
-| EGFX 그래픽 파이프라인 (DVC) | `ironrdp-pdu`에 GFX PDU 정의 존재, DVC 프로세서 직접 구현 필요 |
+| EGFX 그래픽 파이프라인 (DVC) | `ironrdp-dvc 0.5.0` + `ironrdp-pdu` gfx 타입 + `ironrdp-graphics::zgfx` 조합으로 **Uncompressed 코덱까지 즉시 구현 가능** (R9-B-1). AVC420은 ironrdp-egfx 게시 후 (R9-B-2) |
 | RemoteFX Progressive (EGFX 경유) | `Codec2Type::RemoteFxProgressive` — DVC GFX 프로세서 필요 |
-| ClearCodec (EGFX 경유) | `Codec1Type::ClearCodec` — DVC GFX 프로세서 필요 |
+| ClearCodec (EGFX 경유) | `Codec1Type::ClearCodec` — **IronRDP에서 추가 중**, DVC GFX 프로세서 필요 |
 | Planar Codec (EGFX 경유) | `Codec1Type::Planar` — DVC GFX 프로세서 필요 |
-| H.264/AVC420 (EGFX 경유) | `Codec1Type::Avc420` — `openh264` 크레이트로 디코딩 필요 |
-| H.264/AVC444 (EGFX 경유) | `Codec1Type::Avc444` / `Avc444v2` — `openh264` 크레이트로 디코딩 필요 |
-| NSCodec 디코딩 | 협상만 구현, 디코딩 함수 IronRDP에 없음 — 직접 구현 필요 (MS-RDPNSC 스펙) |
+| H.264/AVC420 (EGFX 경유) | `Codec1Type::Avc420` — **IronRDP에서 추가 중** (`openh264` 직접 통합 보류) |
+| H.264/AVC444 (EGFX 경유) | `Codec1Type::Avc444` / `Avc444v2` — **IronRDP에서 추가 중** (`openh264` 직접 통합 보류) |
+| NSCodec 디코딩 | 협상만 구현, **IronRDP에서 디코딩 추가 중** — 공식 릴리스 후 통합 예정 |
 | ZGFX 벌크 압축 해제 (EGFX) | `ironrdp-graphics::zgfx::Decompressor` 존재 — GFX 프로세서 내 통합 필요 |
 | GDI/GDI+ 그래픽 가속 Order | 미처리 |
 | 서버 커서 표시 | `enable_server_pointer: false` |
@@ -259,12 +259,13 @@
 | ~~`ironrdp-tls`~~ | ~~0.2.0~~ | ~~**TLS 보일러플레이트**~~ — ✅ **R2 완료** |
 | `ironrdp-cliprdr` | 0.5.0 | **클립보드 공유** (RDPECLIP 정적 채널) |
 | `ironrdp-cliprdr-native` | 0.5.0 | **클립보드 네이티브 백엔드** (OS 클립보드 연동) |
-| `ironrdp-dvc` | 0.5.0 | **동적 가상 채널** (DRDYNVC) |
+| `ironrdp-dvc` | 0.5.0 | **동적 가상 채널** (DRDYNVC) — R9-B-1에서 수동 GFX 프로세서 구현 시 **직접 추가 필요** (`DvcClientProcessor` 트레이트); R5 DVC 인프라와 공유 |
 | `ironrdp-displaycontrol` | 0.5.0 | **디스플레이 제어** (동적 해상도 변경, DVC 기반) |
 | `ironrdp-input` | 0.5.0 | **입력 유틸리티** — 수동 FastPath 매핑 교체 |
 | `ironrdp-rdpdr` | 0.5.0 | **드라이브 리다이렉션** (RDPDR 채널) |
 | `ironrdp-rdpdr-native` | 0.5.0 | **드라이브 리다이렉션 네이티브 백엔드** |
-| `openh264` | 0.9.3 | **H.264/AVC 디코딩** — EGFX AVC420/AVC444 코덱용 (Cisco OpenH264 바인딩) |
+| `ironrdp-egfx` | 0.1.0 (**crates.io 미게시 — 보류**) | EGFX 전체 파이프라인 — `GraphicsPipelineClient` DVC 프로세서 + ZGFX + AVC420 (openh264 feature) — **crates.io 재게시 후 통합** |
+| `openh264` | — | ~~직접 추가~~ — `ironrdp-egfx` 내부 의존성으로 포함 (`openh264-bundled`/`openh264-libloading` feature 선택) |
 
 | **직접 의존성 제거 완료** | 이유 | 비고 |
 |--------------------------|------|------|
@@ -484,87 +485,199 @@
 
 ### 배경
 
-IronRDP 생태계의 그래픽 코덱 지원 현황:
+IronRDP 생태계의 그래픽 코덱 지원 현황 (2026-03-26 기준):
+
+| 구분 | 코덱 명칭 | IronRDP 지원 상태 | 비고 |
+|------|-----------|-------------------|------|
+| **기본 지원** | Uncompressed Raw Bitmap | ✅ 지원 | 압축되지 않은 원시 비트맵 데이터 전달 |
+| | Interleaved RLE | ✅ 지원 | 런 길이 인코딩(Run-Length Encoding) 방식의 비트맵 코덱 |
+| | RDP 6.0 Bitmap Compression | ✅ 지원 | 표준 RDP 비트맵 압축 방식 |
+| | Microsoft RemoteFX (RFX) | ✅ 지원 | 고성능 그래픽 전송을 위한 웨이블릿 기반 코덱 |
+| **추가 중** | NSCodec ([MS-RDPNSC]) | 🔧 추가 중 | 화면 이미지를 효율적으로 압축하기 위한 확장 코덱 |
+| | ClearCodec | 🔧 추가 중 | 텍스트 및 UI 요소에 최적화된 무손실 코덱 |
+| | AVC420 / AVC444 | 🔧 추가 중 | H.264 기반의 비디오 스트리밍 코덱 |
+
+> **핵심 변경**: NSCodec, ClearCodec, AVC420/AVC444가 IronRDP에서 **공식적으로 추가 작업 중**이므로, kterm에서 이들 코덱을 직접 구현할 필요가 없어짐. IronRDP 공식 릴리스 후 크레이트 업데이트만으로 통합 가능.  
+> **R9 구성**: R9-B-1 (published crates 기반 Uncompressed 코덱 수동 GFX 프로세서 — **즉시 구현 가능**) → R9-B-2 (ironrdp-egfx 기반 교체 + AVC420 — ⏸ 보류) → R9-C (ClearCodec + AVC444 통합 대기) → R9-A (NSCodec 통합 대기)
+
+#### IronRDP 크레이트별 지원 범위 (기존)
 
 | 계층 | 크레이트 | 지원 범위 |
 |------|----------|-----------|
 | **PDU 인코딩/디코딩** | `ironrdp-pdu::rdp::vc::dvc::gfx` | `ServerPdu` 전체: `WireToSurface1` (Codec1Type: Uncompressed/RemoteFx/**ClearCodec/Planar/Avc420/Alpha/Avc444/Avc444v2**), `WireToSurface2` (Codec2Type: **RemoteFxProgressive**), Surface 관리(Create/Delete/Map), 프레임 마커, 캐시, 리셋 |
 | **RemoteFX 디코딩** | `ironrdp-graphics` + `ironrdp-session::rfx` | DWT, RLGR, 양자화, 서브밴드 재구성 → RGB 변환. `CODEC_ID_REMOTEFX` SurfaceCommands **자동 처리** |
 | **ZGFX 벌크 압축** | `ironrdp-graphics::zgfx::Decompressor` | EGFX 채널 데이터 압축 해제 (RDP8) |
-| **AVC PDU 구조** | `ironrdp-pdu::gfx::Avc420BitmapStream`, `Avc444BitmapStream` | H.264 비트스트림 파싱만 — **디코딩은 외부 라이브러리 필요** |
-| **DVC 인프라** | `ironrdp-dvc` | `DvcProcessor` 트레이트 — GFX 채널 프로세서 직접 구현 필요 |
+| **AVC PDU 구조** | `ironrdp-pdu::gfx::Avc420BitmapStream`, `Avc444BitmapStream` | H.264 비트스트림 파싱 |
+| **EGFX 파이프라인 (신규 크레이트)** | `ironrdp-egfx` (GitHub master, **crates.io 미게시**) | `GraphicsPipelineClient` (`DvcClientProcessor` 완전 구현체) + MS-RDPEGFX 전체 PDU 23종 + ZGFX 내장 + AVC420 feature 지원 (`openh264-bundled`/`openh264-libloading`) — 약 1달 전 추가됨 (PR #1057) |
+| **NSCodec** | (추가 중) | IronRDP에서 디코딩 구현 추가 작업 진행 중 |
+| **ClearCodec** | (추가 중) | IronRDP에서 디코딩 구현 추가 작업 진행 중 |
+| **DVC 인프라 + 수동 GFX 프로세서** | `ironrdp-dvc` | `DvcProcessor` / `DvcClientProcessor` 트레이트 — R9-B-1 수동 구현 시 직접 사용; R9-B-2에서 ironrdp-egfx 내부 의존성으로도 포함 |
 
-### 단계 R9-A: NSCodec 디코딩 구현 (독립 — DVC 불필요, 기본 구현 완료)
+### 단계 R9-A: NSCodec 디코딩 통합 (IronRDP 추가 중 — DVC 불필요)
 
-> 현재 `build_config()`에서 NSCodec을 협상하지만 디코딩 코드가 없어 서버가 NSCodec으로 전송 시 **화면 깨짐 발생 가능**
+> IronRDP에서 NSCodec 디코딩을 **공식 추가 작업 중**. kterm 자체 구현 불필요.
+> 현재 `build_config()`에서 NSCodec 협상은 비활성화 상태 — IronRDP 공식 릴리스 후 활성화 예정.
 
-1. **구현 상태**:
-   - `kterm` 측에 MS-RDPNSC 기반 NSCodec fallback 디코더를 직접 추가함.
-   - `Action::FastPath` 프레임을 미러링해 `SurfaceCommands`를 별도로 재파싱하고, IronRDP `active_stage.process()`가 NSCodec `codec_id=1`을 처리하지 못해 실패할 때 kterm이 직접 복구하도록 구성함.
-   - `SetSurfaceBits` / `StreamSurfaceBits`에서 NSCodec payload를 추출하고, fragmented fast-path `SurfaceCommands` 데이터도 재조립함.
-   - NSCodec 메시지의 plane length/header 파싱, plane RLE 해제, YCoCg + ColorLossLevel 보정, RGBA 변환까지 구현함.
-2. **현재 한계**:
-   - 실서버 기반 NSCodec 강제 환경 검증은 아직 완료하지 못함.
-   - fallback 경로는 화면 복구를 우선 해결한 상태이며, NSCodec 경로의 `FrameMarker` ack 필요 여부는 실제 서버 상호운용성 확인 후 추가 정리 가능.
+1. **현재 방향 (변경됨)**:
+   - IronRDP에서 NSCodec 디코딩이 **추가 작업 중**이므로, kterm 자체 fallback 디코더 구현 계획은 완전히 철회.
+   - IronRDP의 NSCodec 지원이 포함된 버전이 릴리스되면 `Cargo.toml` 크레이트 버전 업데이트 + 협상 활성화만으로 통합 가능.
+2. **통합 시 작업**:
+   - `Cargo.toml`에서 `ironrdp` / `ironrdp-graphics` 버전을 NSCodec 지원 버전으로 업데이트
+   - `build_config()`에서 NSCodec 협상 재활성화 (`BitmapCodecs`에 NSCodec 등록)
+   - 디코딩은 IronRDP 내부에서 자동 처리 — kterm 추가 코드 불필요 예상
 3. **남은 검증**:
-   - NSCodec 전용 서버 설정에서 화면 깨짐/무갱신이 없는지 확인
-   - 장시간 세션에서 frame ack 누락 경고나 성능 저하가 없는지 확인
+   - 현재 설정(비-NSCodec 협상)에서 표준 서버 회귀 확인
+   - IronRDP NSCodec 지원 릴리스 추적 및 적용 시점 확정
+   - NSCodec 활성화 후 실제 서버에서 화면 품질/안정성 검증
 
-### 단계 R9-B: EGFX DVC 채널 프로세서 구축 (핵심)
+### 단계 R9-B-1: 최소 수동 GFX 프로세서 구현 (published crates 기반) — ✅ **즉시 구현 가능**
 
-> `ironrdp-dvc`의 `DvcProcessor` 트레이트를 구현하여 MS-RDPEGFX 그래픽 파이프라인 활성화
+> `ironrdp-egfx` 없이도 **현재 crates.io에 게시된 크레이트만으로** Uncompressed 코덱 지원 EGFX 프로세서를 구현할 수 있다.
+> `ironrdp-dvc 0.5.0` + `ironrdp-pdu::rdp::vc::dvc::gfx` (PDU 전체 타입) + `ironrdp-graphics::zgfx::Decompressor` 직접 조합.
 
-1. **`Cargo.toml`**: `ironrdp-dvc = "0.5.0"` 추가 (R5에서 이미 계획)
-2. **GFX 프로세서 구현** (`GfxProcessor: DvcProcessor`):
-   - 채널 이름: `"Microsoft::Windows::RDS::Graphics"`
-   - 수신: `gfx::ServerPdu` 디코딩 (`WireToSurface1`, `WireToSurface2`, `CreateSurface`, `DeleteSurface`, `MapSurfaceToOutput`, `StartFrame`, `EndFrame`, `ResetGraphics` 등)
-   - ZGFX 압축 해제: `ironrdp_graphics::zgfx::Decompressor` 적용
-   - 프레임 마커 처리: `FrameAcknowledgePdu` 응답
-   - Surface 관리: 다중 Surface 생성/삭제/매핑 상태 머신
-3. **코덱 디스패치 (`WireToSurface1`)**:
-   - `Codec1Type::Uncompressed` → 직접 RGBA 변환
-   - `Codec1Type::RemoteFx` → `rfx::DecodingContext::decode()` (기존 코드 재사용)
-   - `Codec1Type::Planar` → Planar 코덱 디코더 (직접 구현 — MS-RDPEGFX 2.2.4.4)
-   - `Codec1Type::ClearCodec` → ClearCodec 디코더 (직접 구현 — MS-RDPEGFX 2.2.4.3)
-   - `Codec1Type::Alpha` → 알파 채널 디코딩
-4. **코덱 디스패치 (`WireToSurface2`)**:
-   - `Codec2Type::RemoteFxProgressive` → Progressive RemoteFX 디코더 (ironrdp-graphics 기반 확장)
-5. **Capability 협상**:
-   - `CapabilitiesAdvertisePdu` 수신 → `CapabilitiesConfirmPdu` 응답
-   - 지원 버전/플래그 선언 (V8, V81, V10 등)
-6. **`build_config()` 수정**:
-   - DVC 채널로 `DrdynvcClient`에 `GfxProcessor` 등록
-   - SurfaceCommands capability 활성화
+#### 즉시 구현 가능한 범위 (published crates 기반)
 
-### 단계 R9-C: H.264/AVC 디코딩 (EGFX 위에서 동작)
+| 기능 | 사용 크레이트 | 비고 |
+|------|--------------|------|
+| GFX DVC 채널 등록 | `ironrdp-dvc 0.5.0` — `DvcClientProcessor` 트레이트 직접 구현 | 채널명: `"Microsoft::Windows::RDS::Graphics"` |
+| ZGFX 벌크 압축 해제 | `ironrdp-graphics::zgfx::Decompressor` | `ironrdp-egfx` 내부와 동일한 구현체 |
+| GFX PDU 파싱 | `ironrdp-pdu::rdp::vc::dvc::gfx` — 23종 PDU 타입 | `WireToSurface1Pdu`, `FrameMarkerPdu`, `ServerPdu` 등 |
+| Uncompressed 코덱 디코딩 | `Codec1Type::Uncompressed` — PDU payload에서 픽셀 데이터 직접 추출 | 별도 코덱 라이브러리 불필요 |
+| Surface 상태 관리 | `BTreeMap<u16, Surface>` 직접 구현 | `CreateSurface` / `DeleteSurface` / `MapSurfaceToOutput` 처리 |
+| Capability 협상 | `CapabilitiesAdvertisePdu` + `CapabilitySet::V8` | IronRDP PDU 타입으로 직접 인코딩 |
+| FrameAcknowledge 전송 | `ClientPdu::FrameAcknowledge(FrameAcknowledgePdu { ... })` | `FrameMarker::End` 수신 시 응답 |
 
-> EGFX `WireToSurface1`의 `Avc420`/`Avc444`/`Avc444v2` 코덱 지원
+#### ironrdp-egfx 없이는 불가능한 범위 (R9-B-2 / R9-C 대기)
 
-1. **`Cargo.toml`**: `openh264 = "0.9.3"` 추가 (Cisco OpenH264 바인딩, BSD-2-Clause)
-2. **AVC420 디코딩**:
-   - `Avc420BitmapStream` → `openh264::decoder::Decoder` → YUV420P → RGBA 변환
-   - 영역별 `QuantQuality` 파라미터 적용
-3. **AVC444 디코딩**:
-   - `Avc444BitmapStream` → 기반 스트림(YUV420) + 보조 스트림(크로마) 결합
-   - `Avc444v2` 변형 지원
-4. **성능 고려사항**:
-   - OpenH264 디코더 인스턴스 재사용 (프레임 간 상태 유지)
-   - YUV→RGB 변환 최적화 (SIMD 활용 가능)
-   - GPU 텍스처 업로드 경로와 통합
+| 기능 | 이유 |
+|------|------|
+| AVC420 / H.264 디코딩 | `openh264` 통합 코드가 `ironrdp-egfx` 내부에만 존재 |
+| ClearCodec 디코딩 | IronRDP 추가 작업 중 (미게시) |
+| AVC444 디코딩 | IronRDP 추가 작업 중 (미게시) |
+| Surface 캐시 합성 (`CacheToSurface`) | 복잡한 캐시 상태 머신 — `ironrdp-egfx`가 완전 처리 |
+
+#### 구현 구조
+
+```rust
+struct GfxProcessor {
+    decompressor: ironrdp_graphics::zgfx::Decompressor,
+    surfaces: BTreeMap<u16, Surface>,
+    // 렌더링 파이프라인 채널 송신자
+    frame_tx: tokio::sync::mpsc::Sender<FrameUpdate>,
+}
+
+impl DvcProcessor for GfxProcessor {
+    const CHANNEL_NAME: &'static str = "Microsoft::Windows::RDS::Graphics";
+    // ...
+}
+
+impl DvcClientProcessor for GfxProcessor {
+    fn process(&mut self, _channel_id: DynamicChannelId, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
+        let data = self.decompressor.decompress(payload)?;
+        let pdu = ironrdp_pdu::decode::<ServerPdu>(&data)?;
+        match pdu {
+            ServerPdu::WireToSurface1(p) if p.codec_id == Codec1Type::Uncompressed => {
+                // 픽셀 데이터 직접 추출 → FrameUpdate::Rect 생성
+            }
+            ServerPdu::FrameMarker(p) if p.frame_action == FrameAction::End => {
+                // FrameAcknowledgePdu 응답 반환
+            }
+            ServerPdu::WireToSurface1(p) => {
+                // 미지원 코덱 경고 로그 (AVC420, ClearCodec 등)
+            }
+            // CreateSurface / DeleteSurface / MapSurfaceToOutput / ResetGraphics ...
+        }
+        Ok(responses)
+    }
+}
+```
+
+#### 작업 목록 (즉시 착수 가능)
+
+1. `Cargo.toml`에 `ironrdp-dvc = "0.5.0"` 직접 추가 (R5와 공유)
+2. `src/connection/rdp.rs`에 `GfxProcessor: DvcClientProcessor` 구현
+   - ZGFX 전처리 (`Decompressor` 내장)
+   - `ServerPdu` 디코딩 분기문
+   - `Codec1Type::Uncompressed` — `FrameUpdate::Rect` 생성
+   - Surface 상태 머신 (Create / Delete / Map / ResetGraphics)
+   - `FrameAcknowledge` 자동 전송
+   - Capability 협상 (V8 기본)
+3. `build_config()`에서 EGFX DVC 채널 등록 (`DrdynvcClient`에 `GfxProcessor` 추가)
+4. 미지원 코덱 수신 시 경고 로그 (R9-B-2 / R9-C 에서 제거 예정)
+
+> **ironrdp-egfx 게시 후**: R9-B-2에서 `GfxProcessor`를 `GraphicsPipelineClient`로 교체 → AVC420 추가, Surface 캐시 처리 개선
+
+---
+
+### 단계 R9-B-2: ironrdp-egfx 기반 전면 교체 + AVC420 추가 — ⏸ **보류** (`ironrdp-egfx` crates.io 게시 대기)
+
+> `ironrdp-egfx` 크레이트가 현재 **재작업 중** (`publish = false`). crates.io 게시 완료 후 착수.
+> R9-B-1에서 구현한 수동 `GfxProcessor`를 `GraphicsPipelineClient`로 교체하고, AVC420을 추가하는 단계.
+> 이 단계는 **ironrdp-egfx가 이미 지원하는 코덱**만 대상으로 함 — 추가 중인 코덱(ClearCodec, AVC444)은 R9-C 참조.
+
+#### `ironrdp-egfx` 크레이트 현황 (2026-03-26)
+- **저장소**: `crates/ironrdp-egfx` in IronRDP GitHub (PR #1057, ~1달 전 추가)
+- **crates.io 게시**: ❌ 미게시 — 재작업 완료 후 재게시 예정
+- **제공 API**: `GraphicsPipelineClient` (`DvcClientProcessor` 완전 구현체), `GraphicsPipelineHandler`, `BitmapUpdate`, `Surface`, `CodecCapabilities`
+- **내장 기능**: ZGFX 압축 해제, 능력 협상(V8~V10.7), Surface 상태 관리, FrameAcknowledge 자동 전송
+
+#### 이 단계에서 추가할 코덱 범위 (R9-B-1 대비)
+| 코덱 | ironrdp-egfx 상태 | R9-B-1과의 차이 |
+|------|-------------------|-----------------|
+| `Codec1Type::Uncompressed` | ✅ 지원 | R9-B-1에서 수동 구현 → `GraphicsPipelineClient` 자동 처리로 교체 |
+| `Codec1Type::Avc420` | ✅ 지원 (openh264 feature) | R9-B-1에서 경고 로그 → `openh264-libloading` feature + `OpenH264Decoder` 주입 시 자동 디코딩 |
+
+#### 게시 후 통합전략 (사전 정리)
+```
+R9-B-1:     kterm의 수동 GfxProcessor (Uncompressed만 지원, ~수백 줄)
+R9-B-2:     ironrdp-egfx::GraphicsPipelineClient로 교체 + GraphicsPipelineHandler 구현 (kterm 고유 로직만)
+효과:       Surface 캐시, FrameAcknowledge, ZGFX 등을 GraphicsPipelineClient가 자동 처리 → kterm 코드 대폭 단순화
+```
+
+게시 후 작업:
+1. `Cargo.toml`에 `ironrdp-egfx = { version = "0.1.0", features = ["openh264-libloading"] }` 추가
+2. `EgfxHandler: GraphicsPipelineHandler` 구현
+   - `on_bitmap_updated(&BitmapUpdate)` → `FrameUpdate::Rect` 생성 → 렌더링 파이프라인 전달
+   - `on_reset_graphics(width, height)` → 프레임 버퍼 리셋 + `FrameUpdate::Resize` 전달
+   - `on_frame_complete` → 배치 병합 타이머 연동
+   - `on_unhandled_pdu` → ClearCodec/AVC444/Planar 등 경고 로그 출력
+3. DVC 채널에 `GraphicsPipelineClient` 등록 (`DrdynvcClient`)
+4. `build_config()` 수정 — EGFX 활성화
+
+### 단계 R9-C: EGFX 추가 코덱 (ClearCodec + AVC444) — ⏸ **보류** (IronRDP/`ironrdp-egfx` 추가 중 대기)
+
+> R9-B 완료 후, **IronRDP에서 추가 작업 중**인 코덱이 `ironrdp-egfx`에 포함되면 kterm `GraphicsPipelineHandler`의 `on_unhandled_pdu` 경로에서 자동 처리 경로로 전환됨.
+
+#### 대기 중인 코덱 현황
+| 코덱 | IronRDP 상태 | ironrdp-egfx 상태 | kterm 대응 |
+|------|-------------|-------------------|-----------|
+| ClearCodec | 🔧 추가 중 | 미구현 (on_unhandled_pdu) | R9-B에서 경고 로그 출력 → ironrdp-egfx 포함 시 자동 처리 |
+| AVC444 / AVC444v2 | 🔧 추가 중 | 미구현 (on_unhandled_pdu) | R9-B에서 경고 로그 출력 → ironrdp-egfx 포함 시 자동 처리 |
+| Planar | 미지원 | 미구현 | 지원 계획 없음 (희귀 코덱) |
+| RemoteFxProgressive (WireToSurface2) | 미지원 | on_wire_to_surface2 위임 | 미정 |
+
+#### 통합 시 작업 (IronRDP/ironrdp-egfx 업데이트 후)
+1. `ironrdp-egfx` 버전 업데이트 (ClearCodec/AVC444 포함 버전)
+2. kterm `EgfxHandler::on_unhandled_pdu`에서 해당 코덱 경고 로그 제거
+3. AVC444 지원 시 `openh264-libloading` feature가 그대로 활용됨
+4. `cargo deny` 라이선스 정책 재검토 (AVC444 추가 특허/라이선스 없음 — openh264로 처리)
 
 ### 기대 효과
 - **EGFX 활성화**: Windows 10/11 서버에서 최적 그래픽 품질 (RemoteFX Progressive, ClearCodec)
-- **H.264 지원**: 영상/동영상 재생 시 대역폭 절감 (AVC420/AVC444)
-- **NSCodec 안정성**: 협상/디코딩 불일치 해소 (현재 잠재적 화면 깨짐 버그)
+- **H.264/AVC420 지원**: 영상/동영상 재생 시 대역폭 절감 — `ironrdp-egfx` + openh264 feature로 즉시 활성화
+- **NSCodec 안정성**: 협상/디코딩 불일치 해소 (IronRDP 추가 중)
 - **Progressive 렌더링**: 저대역폭 환경에서 점진적 화질 개선
+- **구현 부담 대폭 감소**: kterm에서 DVC 프로세서, Surface 상태 머신, ZGFX 압축 해제, FrameAcknowledge 처리 등 직접 구현 불필요 — `GraphicsPipelineClient` + `GraphicsPipelineHandler` 패턴으로 완전 대체
 
 ### 주의사항
-- EGFX GFX 프로세서는 IronRDP에 **전용 크레이트가 없으므로** kterm 자체 구현 필요
-- `ironrdp-pdu::rdp::vc::dvc::gfx`의 PDU 정의와 `ironrdp-graphics`의 기본 요소를 조합
-- ClearCodec, Planar 코덱은 IronRDP에 디코더가 없으므로 MS 스펙 기반 직접 구현
-- OpenH264은 빌드 시 C 컴파일러 필요 (`source` feature 기본 활성화)
-- R5 (DVC 인프라)가 선행되어야 R9-B, R9-C 착수 가능
-- R9-A (NSCodec)는 독립적으로 즉시 착수 가능 (현재 버그 수정 성격)
+- ~~EGFX GFX 프로세서는 IronRDP에 전용 크레이트가 없으므로 kterm 자체 구현 필요~~ → **`ironrdp-egfx` 크레이트가 `GraphicsPipelineClient`로 완전 구현 제공** — kterm은 `GraphicsPipelineHandler` 구현만 필요
+- **`ironrdp-egfx` crates.io 미게시**: R9-B/R9-C 모두 게시 후 착수 — git 의존성은 사용하지 않음
+- **R9-B 범위**: 현재 ironrdp-egfx가 지원하는 Uncompressed + AVC420만 구현 대상. ClearCodec/AVC444는 R9-C로 분리
+- **R9-C 범위**: ironrdp-egfx에 ClearCodec/AVC444가 추가되면 `on_unhandled_pdu` 분기 제거만으로 활성화 가능
+- Planar 코덱은 현재 IronRDP/ironrdp-egfx 모두 지원 계획 없음 — `on_unhandled_pdu` 위임 유지
+- `openh264-bundled` feature는 Cisco 특허 커버리지 없음; 배포 환경은 `openh264-libloading` 사용
+- R5 (DVC 인프라 등록)가 선행되어야 R9-B에서 `GraphicsPipelineClient`를 DVC에 등록 가능
+- R9-A (NSCodec), R9-C (ClearCodec/AVC444) 모두 **IronRDP 업데이트 타이밍에 의존** — 릴리스 추적 필요
 
 ---
 
@@ -578,21 +691,27 @@ R2 (TLS 정리 ✅) ─────────────┤
                               │
                               ├──→ R5 (DVC + 디스플레이 제어) ──→ R6 (드라이브 리다이렉션)
                               │         │
-                              │         └──→ R9-B (EGFX GFX 프로세서) ──→ R9-C (H.264/AVC)
+                              │         └──→ R9-B-2/R9-C (⏸ ironrdp-egfx crates.io 재게시 대기)
                               │
                               ├──→ R7 (보안 강화)
                               │
                               ├──→ R8 (세션 안정성)
                               │
-                              └──→ R9-A (NSCodec 수정) ← 독립, 즉시 착수 가능 (버그 수정)
+                              ├──→ R9-B-1 (최소 수동 GFX, 즉시 착수 가능 ✅)
+                              │         ※ published crates 기반, R5 완료 불필요
+                              │
+                              └──→ R9-A (NSCodec) ← IronRDP 릴리스 대기 (추가 중)
 ```
 
 - **R1 + R2 완료** — 기반 전환 완료. R3~R9 착수 가능.
-- **R9-A**: NSCodec 협상/디코딩 불일치 수정 — **즉시 착수 권장** (잠재적 화면 깨짐 버그).
+- **R9-B-1**: published crates만으로 **즉시 착수 가능** — `ironrdp-dvc 0.5.0` + `ironrdp-pdu` gfx + `ironrdp-graphics::zgfx`로 Uncompressed 코덱 EGFX 처리기 구현. R5(DVC 인프라) 완료 여부와 무관하게 독립 구현 가능.
+- **R9-B-2 + R9-C**: `ironrdp-egfx` 재작업 중 crates.io 미게시 — **게시 완료 후 R5 완료 시점에 맞춰 통합**.
+  - R9-B-2: R9-B-1 수동 구현을 GraphicsPipelineClient로 교체 + AVC420 추가
+  - R9-C: ClearCodec + AVC444 추가 시 자동 활성화 (on_unhandled_pdu 분기 제거)
+- **R9-A (NSCodec)**: IronRDP에서 **추가 작업 중** — 공식 릴리스 후 크레이트 업데이트 + 협상 활성화만으로 통합.
 - **R3**은 R1 완료 후 입력 루프가 비동기로 전환된 상태에서 진행.
 - **R4**는 R1 완료 후 정적 채널 추가로 진행 가능.
-- **R5**는 DVC 인프라가 필요하므로 R1 이후 진행. R5 완료 후 R6 및 **R9-B/R9-C** 착수.
-- **R9-B** (EGFX GFX 프로세서)는 R5의 DVC 인프라 위에 구축. **R9-C** (H.264)는 R9-B 완료 후.
+- **R5**는 DVC 인프라가 필요하므로 R1 이후 진행. R5 완료 후 R6 및 **R9-B/R9-C** 착수 (게시 시점에 연동).
 - **R7, R8**은 기능적으로 독립이나 R1 비동기 전환 후가 효율적.
 
 ---
@@ -615,13 +734,13 @@ rdp.rs
 ├── 픽셀 변환 함수들               // 유지 (rgb24/bgr24/rgb16/bgrx → RGBA)
 ├── (제거 완료) tls_upgrade / NoCertificateVerification / extract_tls_server_public_key
 │
-└── (R9 추가 예정)
-    ├── gfx_processor.rs           // GfxProcessor: DvcProcessor (EGFX 채널)
-    │   ├── Surface 상태 머신      // Create/Delete/Map/Reset
-    │   ├── 코덱 디스패치          // RemoteFX/ClearCodec/Planar/AVC420/AVC444
-    │   ├── ZGFX 압축 해제         // ironrdp_graphics::zgfx::Decompressor
-    │   └── 프레임 마커 처리       // FrameAcknowledgePdu 응답
-    └── nscodec.rs (또는 협상 제거) // NSCodec 디코더 (R9-A)
+└── (R9 추가 예정 — ironrdp-egfx 게시 후)
+    ├── egfx_handler.rs            // GraphicsPipelineHandler 구현 — FrameUpdate 변환기 (kterm 고유)
+    │   ├── on_bitmap_updated()    // BitmapUpdate → FrameUpdate::Rect/Full
+    │   ├── on_reset_graphics()    // 버퍼 리셋 + FrameUpdate::Resize
+    │   └── on_unhandled_pdu()    // AVC444/ClearCodec/Planar 등 로그 출력
+    │   // ★ gfx_processor.rs (DvcProcessor 직접 구현) 불필요 — GraphicsPipelineClient(ironrdp-egfx)로 대체됨
+   └── nscodec.rs (선택, 추후)     // IronRDP 공식 NSCodec 지원 후 필요 시 보조 경로 검토
 ```
 
 ### `src/connection/mod.rs` 확장
@@ -661,8 +780,8 @@ pub enum ConnectionEvent {
 | ~~`ironrdp-tokio` API가 `ironrdp-blocking`과 크게 다를 수 있음~~ | ~~R1 지연~~ | ~~IronRDP GitHub 예제 코드 참조, 점진적 마이그레이션~~ | ✅ R1 완료 |
 | ~~`ironrdp-tls` rustls feature와 기존 `tokio-rustls` 버전 충돌~~ | ~~R2 빌드 실패~~ | ~~`cargo tree` 의존성 트리 사전 검증~~ | ✅ R2 완료 |
 | ~~비동기 전환 중 기존 프레임 배치/스로틀 로직 깨짐~~ | ~~R1~~ | ~~기존 타이머 로직을 `tokio::time::interval`로 1:1 이식 후 개선~~ | ✅ R1 완료 |
-| NSCodec 협상하지만 디코딩 코드 없음 | 잠재적 화면 깨짐 (서버가 NSCodec 전송 시) | kterm fallback NSCodec 디코더 구현으로 1차 완화. 실서버 검증 및 ack 보완 여부 확인 필요 | 부분 완화 |
-| EGFX GFX 프로세서가 IronRDP에 전용 크레이트 없음 | R9-B 구현량 증가 | `ironrdp-pdu` GFX PDU + `ironrdp-graphics` 기본 요소 조합, `DvcProcessor` 트레이트 구현 | R9-B |
+| NSCodec 협상하지만 디코딩 코드 없음 | 잠재적 화면 깨짐 (서버가 NSCodec 전송 시) | 현재 NSCodec 협상을 비활성화하고, IronRDP 공식 지원 시 구현 예정 | 보류(전략 변경) |
+| EGFX GFX 프로세서가 IronRDP에 전용 크레이트 없음 | R9-B-2 전까지 수동 구현 필요 | **R9-B-1**: `ironrdp-dvc` + `ironrdp-pdu` gfx + `ironrdp-graphics::zgfx` 직접 조합으로 Uncompressed 코덱 수동 구현 (즉시 가능). R9-B-2 게시 후 GraphicsPipelineClient로 교체. | R9-B-1 착수 가능 |
 | ClearCodec / Planar 코덱 IronRDP에 디코더 없음 | R9-B 일부 코덱 미지원 | MS-RDPEGFX 스펙 직접 구현. 미지원 코덱은 warn 후 skip | R9-B |
 | OpenH264 빌드 시 C 컴파일러 필요 | CI/크로스컴파일 환경 빌드 실패 | `source` feature 비활성화 후 시스템 OpenH264 링크 옵션 제공 | R9-C |
 | CredSSP 활성화 시 일부 서버와 호환성 문제 | R7 | NLA off 폴백 옵션 유지 | R7 |
@@ -682,7 +801,7 @@ pub enum ConnectionEvent {
 | R6 | 로컬 파일 원격 열기/저장 | 미완 |
 | R7 | NLA 활성 서버 접속, 인증서 검증 경고 표시 | 미완 |
 | R8 | 탭 닫기 후 메모리 누수 없음, 네트워크 끊김 후 재접속 | 미완 |
-| R9-A | NSCodec fallback 디코더 구현 완료, 표준/강제 NSCodec 서버 검증 및 장시간 세션 확인 필요 | 구현 완료, 검증 미완 |
+| R9-A | NSCodec은 IronRDP 공식 지원 시 반영 예정. 현재는 NSCodec 비협상 상태로 안정성 우선 운영 | 보류 |
 | R9-B | EGFX GFX 채널 연결 후 Win10/11 서버에서 RemoteFX Progressive / ClearCodec 화면 정상 표시 | 미완 |
 | R9-C | H.264 AVC420/AVC444로 동영상 재생 시 화면 정상 출력 및 성능 측정 | 미완 |
 
