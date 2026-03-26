@@ -30,7 +30,18 @@ use tokio::sync::mpsc::error::TryRecvError;
 
 use ironrdp_rdpsnd::client::Rdpsnd;
 use ironrdp_rdpsnd_native::cpal::RdpsndBackend;
-use ironrdp_dvc::DrdynvcClient;
+use ironrdp_dvc::{DrdynvcClient, DvcClientProcessor, DvcEncode, DvcMessage, DvcProcessor};
+use ironrdp_core::{impl_as_any, WriteCursor, EncodeResult};
+use ironrdp_core::Encode as IronEncode;
+use ironrdp::graphics::zgfx::Decompressor;
+use ironrdp_dvc::ironrdp_pdu as dvc_pdu;
+use ironrdp::pdu::rdp::vc::dvc::gfx::{
+    ClientPdu, ServerPdu, CapabilitiesAdvertisePdu, CapabilitySet,
+    CapabilitiesV8Flags, CapabilitiesV81Flags, CapabilitiesV10Flags,
+    CapabilitiesV103Flags, CapabilitiesV104Flags, CapabilitiesV107Flags,
+    FrameAcknowledgePdu, QueueDepth, Codec1Type, PixelFormat as GfxPixelFormat,
+};
+use std::collections::BTreeMap;
 use ironrdp_input::{
     synchronize_event, Database, MouseButton as IrdpMouseButton, MousePosition, Operation, Scancode,
     WheelRotations,
@@ -127,7 +138,8 @@ async fn run_rdp_worker_inner(
         .map_err(|e| format!("pdu_log write: {}", e))?;
 
     let config = build_config(username, password, None);
-    let (connection_result, mut framed) = connect(config, host.clone(), port).await?;
+    let (gfx_frame_tx, mut gfx_frame_rx) = mpsc::unbounded_channel::<Vec<crate::remote_display::FrameUpdate>>();
+    let (connection_result, mut framed) = connect(config, host.clone(), port, gfx_frame_tx).await?;
 
     let width = connection_result.desktop_size.width;
     let height = connection_result.desktop_size.height;
@@ -306,6 +318,16 @@ async fn run_rdp_worker_inner(
                 }
             }
             last_frame_emit = Instant::now();
+        }
+
+        // Forward GFX DVC frames (Phase 9-B-1) to the UI without blocking.
+        loop {
+            match gfx_frame_rx.try_recv() {
+                Ok(frames) => {
+                    let _ = tx_from_worker.send(ConnectionEvent::Frames(frames));
+                }
+                Err(_) => break,
+            }
         }
     }
 }
@@ -514,7 +536,15 @@ fn log_x224_pdu(log: &mut std::fs::File, pdu_n: usize, frame: &[u8]) {
     let initiator_id = data_ctx.initiator_id;
 
     let Ok(io_pdu) = rdp_connector::legacy::decode_io_channel(data_ctx) else {
-        let _ = writeln!(log, "[{ts}] #{pdu_n} X224 ch={channel_id} init={initiator_id} <not io-channel> raw={}", hex_head(frame, 32));
+        // Non-IO channel (SVC data: rdpsnd, drdynvc, cliprdr, …)
+        // Try to peek the first byte to hint at the PDU type for DRDYNVC.
+        let dvc_hint = if frame.len() > 10 {
+            let b0 = frame[10]; // first byte of SVC user-data after MCS header (rough estimate)
+            format!(" dvc_b0=0x{b0:02X}")
+        } else {
+            String::new()
+        };
+        let _ = writeln!(log, "[{ts}] #{pdu_n} SVC ch={channel_id}{dvc_hint} raw={}", hex_head(frame, 32));
         return;
     };
 
@@ -820,10 +850,183 @@ fn rect_update_from_image(image: &DecodedImage, rect: InclusiveRectangle) -> Opt
 
 type UpgradedFramed = Framed<MovableTokioStream<ironrdp_tls::TlsStream<tokio::net::TcpStream>>>;
 
+// ── Phase 9-B-1: GFX DVC processor ──────────────────────────────────────────
+
+/// Newtype wrapper so ClientPdu can be sent as a DvcMessage.
+struct GfxClientMsg(ClientPdu);
+
+impl IronEncode for GfxClientMsg {
+    fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
+        self.0.encode(dst)
+    }
+    fn name(&self) -> &'static str { self.0.name() }
+    fn size(&self) -> usize { self.0.size() }
+}
+impl DvcEncode for GfxClientMsg {}
+
+/// Per-surface state tracked by GfxProcessor.
+struct GfxSurface {
+    output_origin_x: u32,
+    output_origin_y: u32,
+}
+
+/// Minimal EGFX DVC processor: ZGFX decompress + ServerPdu dispatch.
+/// Supports Uncompressed codec and FrameAcknowledge. Other codecs log a warning.
+pub struct GfxProcessor {
+    decompressor: Decompressor,
+    surfaces: BTreeMap<u16, GfxSurface>,
+    frame_tx: mpsc::UnboundedSender<Vec<crate::remote_display::FrameUpdate>>,
+    frames_decoded: u32,
+}
+
+impl GfxProcessor {
+    fn new(frame_tx: mpsc::UnboundedSender<Vec<crate::remote_display::FrameUpdate>>) -> Self {
+        Self {
+            decompressor: Decompressor::new(),
+            surfaces: BTreeMap::new(),
+            frame_tx,
+            frames_decoded: 0,
+        }
+    }
+}
+
+impl_as_any!(GfxProcessor);
+
+impl DvcProcessor for GfxProcessor {
+    fn channel_name(&self) -> &str {
+        "Microsoft::Windows::RDS::Graphics"
+    }
+
+    fn start(&mut self, _channel_id: u32) -> dvc_pdu::PduResult<Vec<DvcMessage>> {
+        eprintln!("[GFX] channel opened, advertising capabilities V8..V10_7");
+        let caps = ClientPdu::CapabilitiesAdvertise(CapabilitiesAdvertisePdu(vec![
+            CapabilitySet::V8    { flags: CapabilitiesV8Flags::empty() },
+            CapabilitySet::V8_1  { flags: CapabilitiesV81Flags::empty() },
+            CapabilitySet::V10   { flags: CapabilitiesV10Flags::AVC_DISABLED },
+            CapabilitySet::V10_1,
+            CapabilitySet::V10_2 { flags: CapabilitiesV10Flags::AVC_DISABLED },
+            CapabilitySet::V10_3 { flags: CapabilitiesV103Flags::AVC_DISABLED },
+            CapabilitySet::V10_4 { flags: CapabilitiesV104Flags::AVC_DISABLED },
+            CapabilitySet::V10_5 { flags: CapabilitiesV104Flags::AVC_DISABLED },
+            CapabilitySet::V10_6 { flags: CapabilitiesV104Flags::AVC_DISABLED },
+            CapabilitySet::V10_7 { flags: CapabilitiesV107Flags::AVC_DISABLED },
+        ]));
+        Ok(vec![Box::new(GfxClientMsg(caps))])
+    }
+
+    fn process(&mut self, _channel_id: u32, payload: &[u8]) -> dvc_pdu::PduResult<Vec<DvcMessage>> {
+        let mut decompressed = Vec::new();
+        if let Err(e) = self.decompressor.decompress(payload, &mut decompressed) {
+            eprintln!("[GFX] ZGFX decompress error: {:?}", e);
+            return Ok(vec![]);
+        }
+
+        let pdu = match ironrdp_core::decode::<ServerPdu>(&decompressed) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[GFX] ServerPdu decode error: {:?}", e);
+                return Ok(vec![]);
+            }
+        };
+
+        let mut responses: Vec<DvcMessage> = Vec::new();
+
+        match pdu {
+            ServerPdu::CapabilitiesConfirm(confirm) => {
+                eprintln!("[GFX] capabilities confirmed: {:?}", confirm);
+            }
+            ServerPdu::CreateSurface(create) => {
+                self.surfaces.insert(create.surface_id, GfxSurface {
+                    output_origin_x: 0,
+                    output_origin_y: 0,
+                });
+            }
+            ServerPdu::DeleteSurface(del) => {
+                self.surfaces.remove(&del.surface_id);
+            }
+            ServerPdu::MapSurfaceToOutput(map) => {
+                if let Some(s) = self.surfaces.get_mut(&map.surface_id) {
+                    s.output_origin_x = map.output_origin_x;
+                    s.output_origin_y = map.output_origin_y;
+                }
+            }
+            ServerPdu::ResetGraphics(reset) => {
+                self.surfaces.clear();
+                eprintln!("[GFX] ResetGraphics: {}x{}", reset.width, reset.height);
+            }
+            ServerPdu::StartFrame(_) => {}
+            ServerPdu::EndFrame(end) => {
+                self.frames_decoded += 1;
+                let ack = ClientPdu::FrameAcknowledge(FrameAcknowledgePdu {
+                    queue_depth: QueueDepth::Unavailable,
+                    frame_id: end.frame_id,
+                    total_frames_decoded: self.frames_decoded,
+                });
+                responses.push(Box::new(GfxClientMsg(ack)));
+            }
+            ServerPdu::WireToSurface1(w2s) => {
+                match w2s.codec_id {
+                    Codec1Type::Uncompressed => {
+                        let surface = match self.surfaces.get(&w2s.surface_id) {
+                            Some(s) => s,
+                            None => return Ok(responses),
+                        };
+                        let rect = &w2s.destination_rectangle;
+                        let rect_w = rect.width();
+                        let rect_h = rect.height();
+                        let rgba = gfx_pixels_to_rgba(
+                            &w2s.bitmap_data,
+                            w2s.pixel_format,
+                            rect_w as usize,
+                            rect_h as usize,
+                        );
+                        let x = (surface.output_origin_x as u16).saturating_add(rect.left);
+                        let y = (surface.output_origin_y as u16).saturating_add(rect.top);
+                        let _ = self.frame_tx.send(vec![
+                            crate::remote_display::FrameUpdate::Rect { x, y, width: rect_w, height: rect_h, rgba },
+                        ]);
+                    }
+                    other => {
+                        eprintln!("[GFX] WireToSurface1: unsupported codec {:?} — Phase 9-B-2/C", other);
+                    }
+                }
+            }
+            ServerPdu::WireToSurface2(w2s2) => {
+                eprintln!("[GFX] WireToSurface2: unsupported codec {:?} — Phase 9-B-2/C", w2s2.codec_id);
+            }
+            _ => {}
+        }
+
+        Ok(responses)
+    }
+
+    fn close(&mut self, _channel_id: u32) {
+        eprintln!("[GFX] channel closed");
+    }
+}
+
+impl DvcClientProcessor for GfxProcessor {}
+
+/// Convert GFX XRGB/ARGB (BGRX/BGRA in memory) pixel data to RGBA.
+fn gfx_pixels_to_rgba(src: &[u8], fmt: GfxPixelFormat, width: usize, height: usize) -> Vec<u8> {
+    let pixel_count = width * height;
+    let mut dst = Vec::with_capacity(pixel_count * 4);
+    for chunk in src.chunks_exact(4).take(pixel_count) {
+        dst.push(chunk[2]); // R
+        dst.push(chunk[1]); // G
+        dst.push(chunk[0]); // B
+        dst.push(match fmt { GfxPixelFormat::ARgb => chunk[3], _ => 255 }); // A
+    }
+    dst
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 async fn connect(
     config: connector::Config,
     server_name: String,
     port: u16,
+    gfx_frame_tx: mpsc::UnboundedSender<Vec<crate::remote_display::FrameUpdate>>,
 ) -> Result<(ConnectionResult, UpgradedFramed), String> {
     let server_addr = tokio::net::lookup_host(format!("{}:{}", server_name, port))
         .await
@@ -841,7 +1044,9 @@ async fn connect(
 
     let mut connector = connector::ClientConnector::new(config, client_addr)
         .with_static_channel(Rdpsnd::new(Box::new(RdpsndBackend::new())))
-        .with_static_channel(DrdynvcClient::new());
+        .with_static_channel(
+            DrdynvcClient::new().with_dynamic_channel(GfxProcessor::new(gfx_frame_tx))
+        );
 
     // Phase 1: pre-TLS handshake
     let mut framed: ironrdp_tokio::TokioFramed<tokio::net::TcpStream> = Framed::new(tcp_stream);
