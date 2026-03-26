@@ -100,7 +100,8 @@
 | 프린터 리다이렉션 | 미구현 |
 | 포트/COM 리다이렉션 | 미구현 |
 | USB 리다이렉션 | 미구현 |
-| 동적 가상 채널 (DVC) | 미구현 (정적 채널만 사용) |
+| 동적 가상 채널 (DVC) 인프라 | DRDYNVC 정적 채널 등록 완료. **알려진 버그**: `ironrdp-dvc 0.5.0`이 DYNVC_CAPS_RSP를 항상 V1 고정 전송 → xrdp처럼 V2를 요청하는 서버에서 `"Dynamic Virtual Channel version 1 is not supported"` 에러 발생. upstream 패치 필요. |
+| Microsoft::Windows::RDS::DisplayControl | xrdp가 DVC로 동적 모니터 채널을 열려 하나 kterm에 핸들러 없음 → `NO_LISTENER` 응답 → xrdp 에러 `dynamic_monitor_open_response: error` 발생. 화면 동적 리사이즈 기능 차단 원인. `ironrdp-displaycontrol` 크레이트로 구현 필요. |
 
 #### 세션 관리
 | 항목 | 비고 |
@@ -127,6 +128,13 @@
 - `remote_display` 공통 모듈과 RDP 탭 이미지 렌더링(Full/Rect) 연동 완료.
 - 기본 키보드/마우스 입력 매핑(FastPath): 스캔코드, 유니코드, 이동/클릭/휠 완료.
 - XRDP(LXQt) 환경의 초기 NumLock 불일치 문제에 대해, 전환 PDU가 오지 않는 서버 특성을 로그로 확인했고 NumPad/Navigation 충돌 스캔코드에 한정한 pre-keydown `TS_SYNC_EVENT` 절충안을 적용.
+- **[2026-03-26 PDU 트레이스 분석]** XRDP DRDYNVC 협상 실태 확인:
+  - PDU #2: xrdp → DYNVC_CAPS_REQ V2 전송. `ironrdp-dvc 0.5.0`은 V1 고정 응답 → xrdp `"Dynamic Virtual Channel version 1 is not supported"` 에러. **해결 방법**: upstream 이슈이므로 `ironrdp-dvc` 버전 업 또는 패치 필요.
+  - PDU #49: xrdp → DYNVC_CREATE_REQ `Microsoft::Windows::RDS::DisplayControl` (ch_id=1); kterm NO_LISTENER 응답 → xrdp `dynamic_monitor_open_response: error` (화면 동적 리사이즈 불가 원인)
+- **[2026-03-26 웹 검색 결과]** xrdp MS-RDPEGFX 지원 여부 확인:
+  - **xrdp 0.10.x는 MS-RDPEGFX를 완전히 지원함** (GitHub issue #3540 "egfx unexpected re-init error when resizing", issue #3711 "H.264 codec" 등 다수 이슈·수정 이력으로 확인).
+  - xrdp EGFX 초기화 순서: 연결 초반 로그인 화면 단계에서 `xrdp_egfx_create` → `DYNVC_CREATE_REQ "Microsoft::Windows::RDS::Graphics"` (DVC ch_id=1) → 클라이언트 CAPS_ADVERTISE → xrdp CAPS_CONFIRM 순으로 진행. DisplayControl 채널(ch_id=2)은 그 이후에 열림 → **EGFX와 DisplayControl 실패는 독립적**.
+  - **현재 kterm에서 EGFX DVC가 열리지 않는 유일한 원인은 ironrdp-dvc V2 버그임** (DRDYNVC 협상 자체 실패). V2 버그 해결 시 xrdp는 GFX DVC를 즉시 열 것으로 예상됨.
 - 원격 디스플레이 세션에서 Iced IME commit 문자열을 RDP Unicode 입력으로 전송하도록 분기 처리 완료.
 - 원격 Secure Attention alias로 `Ctrl+Alt+End`를 `Ctrl+Alt+Del`의 Delete 입력으로 매핑 완료.
 - 다중 픽섹 포맷 디코딩(RDP6 32bpp, RLE 16/24bpp, 비압축 BGRX/RGB565) 완료.
@@ -139,7 +147,7 @@
 - **[Phase 1 완료]** `ironrdp_tokio::MovableTokioStream` 기반 `UpgradedFramed` 타입 전환, `ReqwestNetworkClient` 교체.
 - **[Phase 1 완료]** 수동 TLS 코드 제거(`tls_upgrade`, `extract_tls_server_public_key`, `mod danger::NoCertificateVerification` — 약 85줄) → `ironrdp-tls` 크레이트 일괄 교체.
 - **[Phase 1 완료]** `Cargo.toml` 직접 의존성 정리: `ironrdp-blocking`, `tokio-rustls`, `x509-cert`, `sspi` 직접 선언 제거; `ironrdp-tokio = "0.8.0"` (reqwest feature), `ironrdp-tls = "0.2.0"` (rustls feature) 추가.
-- **[R9-B-1 코드 완료 2026-03-26]** EGFX GFX DVC 프로세서 구현: `ironrdp-dvc = "0.5.0"` 추가, `GfxProcessor: DvcClientProcessor` 구현 (ZGFX + Uncompressed 코덱 + Surface 상태 머신 + FrameAcknowledge). `DrdynvcClient`에 `GfxProcessor` 등록 완료. **실제 서버 동작 확인은 추후 진행.**
+- **[R9-B-1 코드 완료 2026-03-26]** EGFX GFX DVC 프로세서 구현: `ironrdp-dvc = "0.5.0"` 추가, `GfxProcessor: DvcClientProcessor` 구현 (ZGFX + Uncompressed 코덱 + Surface 상태 머신 + FrameAcknowledge). `DrdynvcClient`에 `GfxProcessor` 등록 완료. **
 - **[R8-a 코드 완료 2026-03-26]** 탭 닫기 시 `session.sender = None` 명시적 drop 추가 — worker `rx.recv()` 채널이 즉시 닫히도록 수정. **실제 리소스 정리 확인은 추후 진행.**
 
 ## 아키텍처 방향
@@ -173,7 +181,9 @@
 - [ ] RDP 오디오가 원격 세션 재생음을 로컬에서 출력한다. (코드 통합 완료, 테스트 미완료)
 - [x] 공통 렌더링 모듈이 RDP/VNC 모두에서 재사용 가능하다.
 - [ ] 프로토콜 추가 시 UI 계층 수정이 최소화된다.
-- [ ] EGFX GFX DVC 채널 동작 확인 — Win10/11 서버 접속 후 `[GFX] channel opened` 로그 + 화면 품질 변화 검증 (코드 완료 2026-03-26, **실제 동작 확인은 추후**)
+- [ ] EGFX GFX DVC 채널 동작 확인 — **xrdp 0.10.x+는 MS-RDPEGFX 지원함** (GitHub issue #3540, #3711 및 xrdp 로그 분석으로 확인). 현재 블로커: `ironrdp-dvc V2 버그` 미수정 → DRDYNVC 협상 실패 → xrdp가 GFX DVC 채널을 열지 못함. **V2 버그 해결 후** xrdp는 연결 초반(로그인 전)에 `DYNVC_CREATE_REQ "Microsoft::Windows::RDS::Graphics"` 전송 → `GfxProcessor::start()` 호출 → `[GFX] channel opened` 로그 및 화면 품질 향상 확인 가능.
+- [ ] DRDYNVC V2 핸드셰이크 수정 — `ironrdp-dvc 0.5.0` upstream 버그: V2 요청에 V1 고정 응답. upstream PR/버전업 필요. xrdp에서 `"Dynamic Virtual Channel version 1 is not supported"` 에러 발생 중.
+- [ ] DisplayControl DVC 채널 핸들러 구현 — 현재 `NO_LISTENER` 응답으로 xrdp `dynamic_monitor_open_response: error` 발생. 화면 동적 리사이즈(`encode_resize`) 연동 시 함께 구현 필요.
 
 ## 주의사항
 - 초기에 RDP는 터미널 바이트 스트림과 모델이 달라서 별도 이벤트 계층이 필요하다.
