@@ -30,6 +30,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 
 use ironrdp_rdpsnd::client::Rdpsnd;
 use ironrdp_rdpsnd_native::cpal::RdpsndBackend;
+use ironrdp_dvc::DrdynvcClient;
 use ironrdp_input::{
     synchronize_event, Database, MouseButton as IrdpMouseButton, MousePosition, Operation, Scancode,
     WheelRotations,
@@ -839,7 +840,8 @@ async fn connect(
         .map_err(|e| format!("local_addr failed: {}", e))?;
 
     let mut connector = connector::ClientConnector::new(config, client_addr)
-        .with_static_channel(Rdpsnd::new(Box::new(RdpsndBackend::new())));
+        .with_static_channel(Rdpsnd::new(Box::new(RdpsndBackend::new())))
+        .with_static_channel(DrdynvcClient::new());
 
     // Phase 1: pre-TLS handshake
     let mut framed: ironrdp_tokio::TokioFramed<tokio::net::TcpStream> = Framed::new(tcp_stream);
