@@ -4,8 +4,8 @@
 
 | 항목 | 현 상태 |
 |------|---------|
-| 보안 프로토콜 | Standard RDP Security (TLS-only) |
-| `enable_credssp` | `false` 하드코딩 ([rdp.rs](../src/connection/rdp.rs) `build_config()`) |
+| 보안 프로토콜 | Standard RDP Security (TLS-only) → **NLA/CredSSP 활성화 완료** |
+| `enable_credssp` | `true` ([rdp.rs](../src/connection/rdp.rs) `build_config()`) ✅ |
 | `sspi` 크레이트 | 이미 간접 의존 (ironrdp-connector → sspi 0.18.7, `scard` feature 포함) |
 | CredSSP 핸들링 코드 | ironrdp-async `connect_finalize()` 내부에 **완전 구현되어 있음** |
 | 도메인 필드 | `domain: None` 하드코딩 |
@@ -24,7 +24,7 @@ connector.should_perform_credssp() → perform_credssp_step() → CredsspSequenc
 
 ## 구현 계획
 
-### Phase 1: 기본 NLA/CredSSP 활성화 (최소 변경)
+### Phase 1: 기본 NLA/CredSSP 활성화 (최소 변경) ✅ 적용 완료
 
 **난이도**: 낮음  
 **예상 변경 파일**: `src/connection/rdp.rs`

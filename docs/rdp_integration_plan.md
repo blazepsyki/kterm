@@ -41,6 +41,7 @@
 | 마우스 이동 | `PointerFlags::MOVE` |
 | 마우스 좌/우/중 클릭 | `LEFT_BUTTON`, `RIGHT_BUTTON`, `MIDDLE_BUTTON` |
 | 마우스 수직 휠 | `PointerFlags::VERTICAL_WHEEL` |
+| 마우스 수평 휠 | `PointerFlags::HORIZONTAL_WHEEL` |
 
 #### 가상 채널
 | 항목 | 비고 |
@@ -60,7 +61,7 @@
 #### 연결 / 인증
 | 항목 | 비고 |
 |------|------|
-| NLA (CredSSP) | `enable_credssp: false` 고정 |
+| NLA (CredSSP) | `enable_credssp: true` 적용 완료 — NTLM 기반 인증 동작, TLS 폴백 유지 |
 | TLS 서버 인증서 검증 | `NoCertificateVerification` — 보안 취약 |
 | 도메인 인증 | `domain: None` 고정 |
 | 자동 로그온 | `autologon: false` 고정 |
@@ -85,7 +86,7 @@
 #### 입력
 | 항목 | 비고 |
 |------|------|
-| 마우스 수평 휠 | `PointerFlags::HORIZONTAL_WHEEL` 미구현 |
+| 마우스 수평 휠 | `PointerFlags::HORIZONTAL_WHEEL` 구현 완료 |
 | IME 조합 입력 | commit 문자열 전송만 지원, 조합 상태/후보창/세밀한 locale 정책은 미처리 |
 | 복합 키 조합 정밀 매핑 | `Ctrl+Alt+End -> Ctrl+Alt+Del`만 지원, 나머지 복합 조합 정책은 미완 |
 | 서버 lock-state 전환의 프로토콜 기반 감지 | 테스트한 XRDP(LXQt)는 로그인 → 데스크톱 전환 시 `DeactivateAll`/`SetKeyboardIndicators`를 보내지 않아 불가 |
@@ -311,7 +312,7 @@
 ### 미완 항목
 - [ ] `main.rs` `map_key_to_rdp_scancode()` 개선 (`ironrdp-input` 키 매핑 테이블 활용)
 - [ ] IME 조합 입력 기초 지원 (한국어/일본어/중국어)
-- [ ] 마우스 수평 휠 (`PointerFlags::HORIZONTAL_WHEEL`)
+- [x] 마우스 수평 휠 (`MouseHorizontalWheel`) — `connection/mod.rs` + `rdp.rs` `handle_rdp_input()`에 구현 완료
 - [ ] 복합 키 조합 정밀 매핑 (Ctrl+Alt+Del, Win 키 등)
 - [ ] Extended 키 플래그 정밀화
 
@@ -332,7 +333,7 @@
 
 > `ironrdp-cliprdr` + `ironrdp-cliprdr-native` 통합
 
-**상태**: 구현 및 텍스트 복사/붙여넣기 확인 완료 2026-03-26
+**상태**: Windows 백엔드 초기화 코드 구현 완료, RDP 워커 연결 배선 미완(2026-03-26)
 
 #### 변경 내용
 1. **`Cargo.toml`**: `ironrdp-cliprdr = "0.5.0"`, `ironrdp-cliprdr-native = "0.5.0"` 추가

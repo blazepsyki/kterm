@@ -41,6 +41,8 @@
   - [x] 키보드/마우스 입력을 RDP 입력 이벤트로 매핑(기본)
     - [x] 기본 키보드 입력 매핑(FastPath scancode/unicode) 연동
     - [x] 마우스 이동/클릭/휠 입력 매핑
+    - [x] 마우스 수평 휠 (`MouseHorizontalWheel`) 매핑
+  - [x] NLA/CredSSP 활성화 (`enable_credssp: true`)
   - [ ] 탭 종료/예외 상황 안정화 및 회귀 테스트
   - [ ] 상세 작업 문서: `docs/rdp_integration_plan.md`
 - [ ] 14단계: VNC 그래픽 연결 인터페이스 구현
