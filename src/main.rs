@@ -20,6 +20,36 @@ use remote_display::RemoteDisplayState;
 use terminal::{TerminalEmulator, TerminalView, Selection};
 use tokio::sync::mpsc;
 
+// ── Clipboard (Windows native CLIPRDR backend) ────────────────────────────────
+#[cfg(windows)]
+use ironrdp_cliprdr::backend::{ClipboardMessage, ClipboardMessageProxy};
+#[cfg(windows)]
+use ironrdp_cliprdr_native::WinClipboard;
+
+/// Proxy implementation that forwards ClipboardMessage events from the
+/// WinClipboard OS message loop to the RDP worker's async channel.
+#[cfg(windows)]
+#[derive(Debug)]
+struct ChannelProxy {
+    tx: mpsc::UnboundedSender<ClipboardMessage>,
+}
+
+#[cfg(windows)]
+impl ClipboardMessageProxy for ChannelProxy {
+    fn send_clipboard_message(&self, message: ClipboardMessage) {
+        let _ = self.tx.send(message);
+    }
+}
+
+// Per-session WinClipboard instances stored in thread-local storage so they
+// can hold !Send types while living on the iced main thread.
+#[cfg(windows)]
+thread_local! {
+    static WIN_CLIPBOARDS: std::cell::RefCell<std::collections::HashMap<u64, WinClipboard>>
+        = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 pub const D2CODING: iced::Font = iced::Font {
     family: iced::font::Family::Name("D2Coding"),
     ..iced::Font::DEFAULT
@@ -363,6 +393,9 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             // the channel-closed signal and exits its recv() loop immediately.
             if let Some(session) = state.sessions.get_mut(index) {
                 session.sender = None;
+                // Clean up the native clipboard window for this session.
+                #[cfg(windows)]
+                WIN_CLIPBOARDS.with(|m| m.borrow_mut().remove(&session.id));
             }
             state.sessions.remove(index);
             if state.active_index >= state.sessions.len() { state.active_index = state.sessions.len() - 1; }
@@ -609,8 +642,33 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
 
             if let Some(target_id) = target_id {
+                // ── Windows native clipboard (CLIPRDR) ───────────────────────
+                #[cfg(windows)]
+                let (cliprdr_factory, clipboard_rx_opt) = {
+                    let (cb_tx, cb_rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+                    let proxy = Box::new(ChannelProxy { tx: cb_tx });
+                    match WinClipboard::new(*proxy) {
+                        Ok(win_clipboard) => {
+                            let factory = win_clipboard.backend_factory();
+                            WIN_CLIPBOARDS.with(|m| m.borrow_mut().insert(target_id, win_clipboard));
+                            (Some(factory), Some(cb_rx))
+                        }
+                        Err(e) => {
+                            eprintln!("[CLIPRDR] WinClipboard creation failed: {}", e);
+                            (None, None)
+                        }
+                    }
+                };
+                #[cfg(not(windows))]
+                let (cliprdr_factory, clipboard_rx_opt) = {
+                    let f: Option<Box<dyn ironrdp_cliprdr::backend::CliprdrBackendFactory + Send>> = None;
+                    let r: Option<mpsc::UnboundedReceiver<ironrdp_cliprdr::backend::ClipboardMessage>> = None;
+                    (f, r)
+                };
+                // ─────────────────────────────────────────────────────────────
+
                 Task::run(
-                    connection::rdp::connect_and_subscribe(host, port, user, pass),
+                    connection::rdp::connect_and_subscribe(host, port, user, pass, cliprdr_factory, clipboard_rx_opt),
                     move |event| Message::ConnectionMessage(target_id, event),
                 )
             } else {

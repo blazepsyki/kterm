@@ -95,7 +95,7 @@
 #### 채널 / 리다이렉션
 | 항목 | 비고 |
 |------|------|
-| 클립보드 공유 (RDPCLIP) | 미구현 |
+| 클립보드 공유 (RDPCLIP) | **Phase 4-1 완료**: `ironrdp-cliprdr` + `ironrdp-cliprdr-native` 기반 Windows 경로 구현 및 텍스트 복사/붙여넣기 확인. **Phase 4-2 필요**: Linux/macOS 백엔드 설계/구현 |
 | 드라이브 리다이렉션 (RDPDR) | 미구현 |
 | 프린터 리다이렉션 | 미구현 |
 | 포트/COM 리다이렉션 | 미구현 |
@@ -316,23 +316,101 @@
 
 ## Phase 4: 클립보드 공유
 
+> `ironrdp-cliprdr` 기반 공통 CLIPRDR 계층 + 플랫폼별 OS 클립보드 백엔드
+
+### Phase 4-1: Windows 네이티브 백엔드
+
 > `ironrdp-cliprdr` + `ironrdp-cliprdr-native` 통합
 
-### 변경 내용
+**상태**: 구현 및 텍스트 복사/붙여넣기 확인 완료 2026-03-26
+
+#### 변경 내용
 1. **`Cargo.toml`**: `ironrdp-cliprdr = "0.5.0"`, `ironrdp-cliprdr-native = "0.5.0"` 추가
-2. **채널 등록**: `ClientConnector::with_static_channel(Cliprdr::new(backend))` 추가
+2. **채널 등록**: `ClientConnector::with_static_channel(CliprdrClient::new(backend))` 추가
 3. **클립보드 흐름**:
    - 로컬 → 원격: OS 클립보드 변경 감지 → CLIPRDR 채널로 전송
-   - 원격 → 로컬: CLIPRDR 수신 → OS 클립보드에 반영
+   - 원격 → 로컬: CLIPRDR 수신 → `ironrdp-cliprdr-native` Windows 백엔드가 OS 클립보드에 반영
 4. **지원 형식**:
-   - 텍스트 (CF_UNICODETEXT)
+   - 텍스트 (CF_UNICODETEXT) 중심의 네이티브 백엔드 경로
    - 이미지 (CF_DIB) — 후속
    - 파일 목록 (CF_HDROP) — 후속
-5. **`ConnectionInput` 확장**: `ClipboardUpdate(String)` 변형 추가
+5. **구현 방식**:
+   - `WinClipboard::new(proxy)`로 숨김 윈도우 + 클립보드 리스너 생성
+   - `ClipboardMessageProxy`로 OS 이벤트를 RDP 워커 async 채널로 전달
+   - 워커에서 `CliprdrClient::initiate_copy`, `submit_format_data`, `initiate_paste` 호출
+6. **플랫폼 범위**:
+   - 현재 앱 코드에서 `WinClipboard` 경로는 `cfg(windows)`로만 활성화
+   - 비-Windows 빌드에서는 CLIPRDR 백엔드 팩토리를 연결하지 않으므로 이 경로는 동작하지 않음
 
-### 기대 효과
+#### 기대 효과
 - 복사/붙여넣기 연동 (RDP에서 가장 자주 요청되는 기능)
 - 기존 SSH/Telnet과 동일 수준의 클립보드 UX
+- 네이티브 백엔드를 직접 재구현하지 않고 IronRDP가 제공하는 Windows 구현 재사용
+
+#### 검증 메모
+- 텍스트 복사/붙여넣기 양방향 동작 확인 완료
+- 이미지/파일 목록 경로는 아직 후속 검증 필요
+- 위 검증은 Windows 환경 기준
+
+### Phase 4-2: Linux/macOS 백엔드 설계
+
+> `ironrdp-cliprdr::backend::CliprdrBackend`를 직접 구현하는 교차 플랫폼 경로
+
+**상태**: 설계 단계
+
+#### 목표 범위
+1. Linux(X11/Wayland) 및 macOS에서 텍스트 클립보드(CF_UNICODETEXT) 우선 지원
+2. 기존 Phase 4-1의 RDP 워커 연동 방식은 유지하고, OS 클립보드 백엔드만 교체 가능하게 분리
+3. 이미지/파일 목록은 4-2 1차 범위에서 제외하고 텍스트 경로 안정화 후 확장
+
+#### 권장 구조
+1. **공통 추상화 추가**:
+   - `CliprdrBackendFactory`를 플랫폼별로 생성하는 앱 레벨 팩토리 계층 도입
+   - `main.rs`의 `cfg(windows)` 분기를 `platform/clipboard_*` 모듈로 이동
+2. **플랫폼별 백엔드**:
+   - Windows: 기존 `WinClipboard` 유지
+   - Linux/macOS: `CliprdrBackend` 구현체를 앱 내부에 추가
+3. **공통 메시지 흐름 유지**:
+   - OS 이벤트/폴링 → `ClipboardMessageProxy`
+   - RDP 워커 → `CliprdrClient::{initiate_copy, submit_format_data, initiate_paste}`
+   - 이 경로는 Windows 구현과 동일하게 재사용
+
+#### Linux/macOS 구현 전략
+1. **초기 범위는 텍스트 전용**:
+   - 로컬 복사 시 `ClipboardFormatId::CF_UNICODETEXT`만 광고
+   - 원격 paste 요청 시 UTF-16 텍스트 인코딩/디코딩만 처리
+2. **OS 클립보드 접근 방식**:
+   - 1순위 후보: `arboard` 기반 read/write 경로 재사용
+   - 변경 감지는 플랫폼 제약 때문에 이벤트 기반보다 주기적 폴링이 현실적
+   - Linux Wayland 환경은 소유권/세션 제약이 있어 폴링 실패 또는 권한 이슈를 별도 처리해야 함
+3. **백엔드 이벤트 루프**:
+   - Tokio task 또는 전용 스레드에서 마지막 텍스트 값 해시/스냅샷 비교
+   - 변경 시 `ClipboardMessage::SendInitiateCopy(vec![CF_UNICODETEXT])` 전송
+   - `on_format_data_request`에서 현재 로컬 텍스트를 `OwnedFormatDataResponse`로 변환
+   - `on_format_data_response`에서 원격 텍스트를 로컬 OS 클립보드에 반영
+
+#### 설계 시 주의점
+1. **Wayland 제약**:
+   - 백그라운드 앱의 clipboard ownership과 pasteboard 접근이 compositor 정책에 의해 제한될 수 있음
+   - 필요 시 X11/Wayland 지원 상태를 분리 표기해야 함
+2. **macOS 제약**:
+   - 앱 포커스/런루프와 pasteboard 갱신 타이밍 차이 검증 필요
+3. **중복 전송 루프 방지**:
+   - 원격에서 받은 텍스트를 로컬에 쓴 직후 다시 로컬 변경으로 감지해 역전송하지 않도록 suppression token 필요
+4. **현재 UI clipboard와 역할 분리**:
+   - Iced clipboard는 사용자 명시 복사/붙여넣기용으로 남기고, Phase 4-2는 세션 동기화 백엔드로 별도 유지하는 편이 안전
+
+#### 예상 구현 단계
+1. `platform/clipboard/mod.rs` 도입: 공통 팩토리 인터페이스 정의
+2. `platform/clipboard_windows.rs`: 현재 `WinClipboard` 연동 코드 이동
+3. `platform/clipboard_unix.rs`: Linux/macOS용 `CliprdrBackend` + 폴링 루프 구현
+4. `main.rs`: 플랫폼별 백엔드 생성 호출만 남기도록 단순화
+5. Linux(X11/Wayland), macOS 각각에서 텍스트 양방향 검증
+
+#### 완료 조건
+- Linux에서 텍스트 복사/붙여넣기 양방향 확인
+- macOS에서 텍스트 복사/붙여넣기 양방향 확인
+- Windows Phase 4-1 경로와 동일한 RDP 워커 인터페이스 유지
 
 ---
 
@@ -621,7 +699,8 @@ Phase 9-B-2:     ironrdp-egfx::GraphicsPipelineClient로 교체 + GraphicsPipeli
 ```
 Phase 1 (연결 기반 구축 ✅) ──────────────┬
                               ├──→ Phase 3 (입력 개선)
-                              ├──→ Phase 4 (클립보드)
+                              ├──→ Phase 4-1 (Windows 클립보드)
+                              │         └──→ Phase 4-2 (Linux/macOS 클립보드)
                               │
                               ├──→ Phase 5 (DVC + 디스플레이 제어) ──→ Phase 6 (드라이브 리다이렉션)
                               │         │
@@ -644,7 +723,8 @@ Phase 1 (연결 기반 구축 ✅) ──────────────┬
   - Phase 9-C: ClearCodec + AVC444 추가 시 자동 활성화 (on_unhandled_pdu 분기 제거)
 - **Phase 9-A (NSCodec)**: IronRDP에서 **추가 작업 중** — 공식 릴리스 후 크레이트 업데이트 + 협상 활성화만으로 통합.
 - **Phase 3**은 Phase 1 완료 후 입력 루프가 비동기로 전환된 상태에서 진행.
-- **Phase 4**는 Phase 1 완료 후 정적 채널 추가로 진행 가능.
+- **Phase 4-1**은 완료. Windows에서 CLIPRDR 텍스트 경로 검증까지 끝남.
+- **Phase 4-2**는 Phase 1 완료 후 동일한 정적 채널 구조를 재사용해 Linux/macOS 백엔드만 추가 구현하면 됨.
 - **Phase 5**는 DVC 인프라가 필요하므로 Phase 1 이후 진행. Phase 5 완료 후 Phase 6 및 **Phase 9-B/Phase 9-C** 착수 (게시 시점에 연동).
 - **Phase 7, Phase 8**은 기능적으로 독립이나 Phase 1 비동기 전환 후가 효율적.
 
@@ -729,7 +809,8 @@ pub enum ConnectionEvent {
 |-------|--------|------|
 | Phase 1 | 비동기 I/O + TLS 전환; 자체서명/공인 인증서 서버; Windows Server 2019/2022 + Win10/11 회귀 테스트 | ✅ 완료 확인 |
 | Phase 3 | 한국어 IME 입력, Function 키, 복합 키 조합 | 미완 |
-| Phase 4 | 텍스트 복사/붙여넣기 양방향 확인 | 미완 |
+| Phase 4-1 | Windows 텍스트 복사/붙여넣기 양방향 확인 | ✅ 완료 확인 |
+| Phase 4-2 | Linux/macOS 텍스트 복사/붙여넣기 양방향 확인 | 설계 단계 |
 | Phase 5 | 해상도 변경 후 화면 깨짐 없음 확인 | 미완 |
 | Phase 6 | 로컬 파일 원격 열기/저장 | 미완 |
 | Phase 7 | NLA 활성 서버 접속, 인증서 검증 경고 표시 | 미완 |
