@@ -43,6 +43,11 @@
     - [x] 마우스 이동/클릭/휠 입력 매핑
     - [x] 마우스 수평 휠 (`MouseHorizontalWheel`) 매핑
   - [x] NLA/CredSSP 활성화 (`enable_credssp: true`)
+  - [x] 클립보드 공유 (Phase 4-1 Windows): `ironrdp-cliprdr`/`ironrdp-cliprdr-native` 기반
+    - [x] `WinClipboard` + `ChannelProxy` 초기화 (`main.rs`)
+    - [x] `connect_and_subscribe()`에 `cliprdr_factory`/`clipboard_rx_opt` 전달 배선
+    - [x] `CliprdrClient` 정적 채널 등록 + OS 클립보드 이벤트 처리 루프
+    - [x] 텍스트 복사/붙여넣기 양방향 검증 완료
   - [ ] 탭 종료/예외 상황 안정화 및 회귀 테스트
   - [ ] 상세 작업 문서: `docs/rdp_integration_plan.md`
 - [ ] 14단계: VNC 그래픽 연결 인터페이스 구현

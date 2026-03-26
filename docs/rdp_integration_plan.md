@@ -333,7 +333,7 @@
 
 > `ironrdp-cliprdr` + `ironrdp-cliprdr-native` 통합
 
-**상태**: Windows 백엔드 초기화 코드 구현 완료, RDP 워커 연결 배선 미완(2026-03-26)
+**상태**: ✅ **완료** (2026-03-27) — Windows 백엔드 초기화, RDP 워커 연결 배선, 텍스트 복사/붙여넣기 양방향 동작 확인
 
 #### 변경 내용
 1. **`Cargo.toml`**: `ironrdp-cliprdr = "0.5.0"`, `ironrdp-cliprdr-native = "0.5.0"` 추가
@@ -734,7 +734,7 @@ Phase 1 (연결 기반 구축 ✅) ──────────────┬
   - Phase 9-C: ClearCodec + AVC444 추가 시 자동 활성화 (on_unhandled_pdu 분기 제거)
 - **Phase 9-A (NSCodec)**: IronRDP에서 **추가 작업 중** — 공식 릴리스 후 크레이트 업데이트 + 협상 활성화만으로 통합.
 - **Phase 3**은 Phase 1 완료 후 입력 루프가 비동기로 전환된 상태에서 진행.
-- **Phase 4-1**은 완료. Windows에서 CLIPRDR 텍스트 경로 검증까지 끝남.
+- **Phase 4-1** ✅ 완료. `connect_and_subscribe()`에 `cliprdr_factory`/`clipboard_rx_opt` 전달, `CliprdrClient` 정적 채널 등록, OS 클립보드 이벤트 처리 루프(`ClipboardMessage` → `initiate_copy`/`submit_format_data`/`initiate_paste` → `process_svc_processor_messages`)까지 구현 완료. Windows에서 텍스트 복사/붙여넣기 양방향 검증 완료.
 - **Phase 4-2**는 Phase 1 완료 후 동일한 정적 채널 구조를 재사용해 Linux/macOS 백엔드만 추가 구현하면 됨.
 - **Phase 5**는 DVC 인프라가 필요하므로 Phase 1 이후 진행. Phase 5 완료 후 Phase 6 및 **Phase 9-B/Phase 9-C** 착수 (게시 시점에 연동).
 - **Phase 7, Phase 8**은 기능적으로 독립이나 Phase 1 비동기 전환 후가 효율적.

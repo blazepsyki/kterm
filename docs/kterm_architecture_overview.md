@@ -81,7 +81,7 @@ graph TD
 - **SSH (`ssh.rs`)**: `russh` 클라이언트를 감싸고 비동기 스트림으로 서버 데이터를 `ConnectionEvent::Data`로 방출합니다.
 - **Telnet (`telnet.rs`)**: `nectar` 기반 Telnet codec 처리 및 NAWS 윈도우 크기 협상을 담당합니다.
 - **Serial (`serial.rs`)**: `tokio-serial` 기반 비동기 Serial 스트림. `tokio::io::split`으로 읽기/쓰기 반분할 후 `tokio::select!`로 입출력을 동시 처리합니다.
-- **RDP (`rdp.rs`)**: `ironrdp` 기반 `ironrdp-tokio` 비동기 핸드셰이크, `tokio::select!` 기반 이벤트 드리븐 `ActiveStage` PDU 루프, FastPath/Slow-path 비트맵 디코딩(RDP6/RLE 16·24bpp/BGRX/RGB565), EGFX DVC 프로세서(`GfxProcessor`)를 담당합니다. `ironrdp-input`의 `Database`/`Operation`/`Scancode` 타입으로 입력을 처리하며, XRDP 계열 서버의 NumLock 불일치를 완화하기 위해 NumPad/Navigation 충돌 스캔코드 입력 직전에만 `TS_SYNC_EVENT`를 선행 전송합니다. 비동기 Tokio 태스크(`tokio::spawn`)에서 실행됩니다.
+- **RDP (`rdp.rs`)**: `ironrdp` 기반 `ironrdp-tokio` 비동기 핸드셰이크, `tokio::select!` 기반 이벤트 드리븐 `ActiveStage` PDU 루프, FastPath/Slow-path 비트맵 디코딩(RDP6/RLE 16·24bpp/BGRX/RGB565), EGFX DVC 프로세서(`GfxProcessor`), CLIPRDR 클립보드 공유(`CliprdrClient` 정적 채널 + OS 이벤트 처리 루프)를 담당합니다. `ironrdp-input`의 `Database`/`Operation`/`Scancode` 타입으로 입력을 처리하며, XRDP 계열 서버의 NumLock 불일치를 완화하기 위해 NumPad/Navigation 충돌 스캔코드 입력 직전에만 `TS_SYNC_EVENT`를 선행 전송합니다. 비동기 Tokio 태스크(`tokio::spawn`)에서 실행됩니다.
 - **RDP 입력 정책 (`rdp_input_policy.rs`)**: Iced 물리 키 이벤트를 RDP 스캔코드/유니코드로 라우팅하는 정책 결정 모듈입니다. 스캔코드 매핑 테이블, Lock 키 감지, Ctrl+Alt+End → Secure Attention 변환, IME commit 문자열의 Unicode 입력 시퀀스 변환을 담당합니다.
 - **OS 플랫폼 추상화 (`platform/mod.rs`)**: 현재 윈도우 한정으로 `portable-pty`를 이용해 사용자가 선택한 셸(`pwsh/powershell/cmd/bash`) 프로세스를 백그라운드 스폰하는 로컬 가상 터미널 엔진입니다.
 

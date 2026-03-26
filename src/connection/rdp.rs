@@ -31,6 +31,8 @@ use tokio::sync::mpsc::error::TryRecvError;
 use ironrdp_rdpsnd::client::Rdpsnd;
 use ironrdp_rdpsnd_native::cpal::RdpsndBackend;
 use ironrdp_dvc::{DrdynvcClient, DvcClientProcessor, DvcEncode, DvcMessage, DvcProcessor};
+use ironrdp_cliprdr::{Cliprdr, CliprdrClient};
+use ironrdp_cliprdr::backend::{ClipboardMessage, CliprdrBackendFactory};
 use ironrdp_core::{impl_as_any, WriteCursor, EncodeResult};
 use ironrdp_core::Encode as IronEncode;
 use ironrdp::graphics::zgfx::Decompressor;
@@ -56,12 +58,14 @@ pub fn connect_and_subscribe(
     port: u16,
     username: String,
     password: String,
+    cliprdr_factory: Option<Box<dyn CliprdrBackendFactory + Send>>,
+    clipboard_rx: Option<mpsc::UnboundedReceiver<ClipboardMessage>>,
 ) -> futures::stream::BoxStream<'static, ConnectionEvent> {
     let (tx_to_rdp, rx_from_iced) = mpsc::unbounded_channel::<ConnectionInput>();
     let (tx_from_worker, rx_from_worker) = mpsc::unbounded_channel::<ConnectionEvent>();
 
     tokio::spawn(async move {
-        run_rdp_worker(host, port, username, password, rx_from_iced, tx_from_worker, tx_to_rdp).await;
+        run_rdp_worker(host, port, username, password, rx_from_iced, tx_from_worker, tx_to_rdp, cliprdr_factory, clipboard_rx).await;
     });
 
     // Batch consecutive Frames events to reduce Handle rebuilds on the UI side.
@@ -111,9 +115,11 @@ async fn run_rdp_worker(
     rx_from_iced: mpsc::UnboundedReceiver<ConnectionInput>,
     tx_from_worker: mpsc::UnboundedSender<ConnectionEvent>,
     tx_to_rdp: mpsc::UnboundedSender<ConnectionInput>,
+    cliprdr_factory: Option<Box<dyn CliprdrBackendFactory + Send>>,
+    clipboard_rx: Option<mpsc::UnboundedReceiver<ClipboardMessage>>,
 ) {
     let tx_err = tx_from_worker.clone();
-    if let Err(err) = run_rdp_worker_inner(host, port, username, password, rx_from_iced, tx_from_worker, tx_to_rdp).await {
+    if let Err(err) = run_rdp_worker_inner(host, port, username, password, rx_from_iced, tx_from_worker, tx_to_rdp, cliprdr_factory, clipboard_rx).await {
         let _ = tx_err.send(ConnectionEvent::Error(err));
     }
 }
@@ -126,6 +132,8 @@ async fn run_rdp_worker_inner(
     mut rx_from_iced: mpsc::UnboundedReceiver<ConnectionInput>,
     tx_from_worker: mpsc::UnboundedSender<ConnectionEvent>,
     tx_to_rdp: mpsc::UnboundedSender<ConnectionInput>,
+    cliprdr_factory: Option<Box<dyn CliprdrBackendFactory + Send>>,
+    mut clipboard_rx: Option<mpsc::UnboundedReceiver<ClipboardMessage>>,
 ) -> Result<(), String> {
     // --- PDU trace log -------------------------------------------------------
     // Log handshake sequencing plus every runtime Action so protocol behavior
@@ -139,7 +147,7 @@ async fn run_rdp_worker_inner(
 
     let config = build_config(username, password, None);
     let (gfx_frame_tx, mut gfx_frame_rx) = mpsc::unbounded_channel::<Vec<crate::remote_display::FrameUpdate>>();
-    let (connection_result, mut framed) = connect(config, host.clone(), port, gfx_frame_tx).await?;
+    let (connection_result, mut framed) = connect(config, host.clone(), port, gfx_frame_tx, cliprdr_factory).await?;
 
     let width = connection_result.desktop_size.width;
     let height = connection_result.desktop_size.height;
@@ -166,6 +174,57 @@ async fn run_rdp_worker_inner(
 
     loop {
         tokio::select! {
+            maybe_clipboard_msg = async {
+                if let Some(ref mut rx) = clipboard_rx {
+                    rx.recv().await
+                } else {
+                    futures::future::pending().await
+                }
+            } => {
+                if let Some(msg) = maybe_clipboard_msg {
+                    // Obtain a reference to the registered CliprdrClient SVC processor
+                    // and dispatch the OS clipboard event to the appropriate Cliprdr method.
+                    let svc_result = match msg {
+                        ClipboardMessage::SendInitiateCopy(formats) => {
+                            if let Some(cliprdr) = active_stage.get_svc_processor::<CliprdrClient>() {
+                                cliprdr.initiate_copy(&formats).ok()
+                            } else { None }
+                        }
+                        ClipboardMessage::SendFormatData(response) => {
+                            if let Some(cliprdr) = active_stage.get_svc_processor::<CliprdrClient>() {
+                                cliprdr.submit_format_data(response).ok()
+                            } else { None }
+                        }
+                        ClipboardMessage::SendInitiatePaste(format_id) => {
+                            if let Some(cliprdr) = active_stage.get_svc_processor::<CliprdrClient>() {
+                                cliprdr.initiate_paste(format_id).ok()
+                            } else { None }
+                        }
+                        ClipboardMessage::Error(e) => {
+                            eprintln!("[CLIPRDR] OS clipboard error: {}", e);
+                            None
+                        }
+                    };
+
+                    // Encode the SVC messages into a network frame and send it.
+                    if let Some(messages) = svc_result {
+                        match active_stage.process_svc_processor_messages(messages) {
+                            Ok(frame) => {
+                                if !frame.is_empty() {
+                                    framed
+                                        .write_all(&frame)
+                                        .await
+                                        .map_err(|e| format!("clipboard frame write failed: {}", e))?;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("[CLIPRDR] process_svc_processor_messages error: {:?}", e);
+                            }
+                        }
+                    }
+                }
+            }
+
             maybe_input = rx_from_iced.recv() => {
                 let Some(input) = maybe_input else {
                     let _ = tx_from_worker.send(ConnectionEvent::Data(
@@ -1027,6 +1086,7 @@ async fn connect(
     server_name: String,
     port: u16,
     gfx_frame_tx: mpsc::UnboundedSender<Vec<crate::remote_display::FrameUpdate>>,
+    cliprdr_factory: Option<Box<dyn CliprdrBackendFactory + Send>>,
 ) -> Result<(ConnectionResult, UpgradedFramed), String> {
     let server_addr = tokio::net::lookup_host(format!("{}:{}", server_name, port))
         .await
@@ -1047,6 +1107,10 @@ async fn connect(
         .with_static_channel(
             DrdynvcClient::new().with_dynamic_channel(GfxProcessor::new(gfx_frame_tx))
         );
+
+    if let Some(factory) = cliprdr_factory {
+        connector = connector.with_static_channel(Cliprdr::new(factory.build_cliprdr_backend()));
+    }
 
     // Phase 1: pre-TLS handshake
     let mut framed: ironrdp_tokio::TokioFramed<tokio::net::TcpStream> = Framed::new(tcp_stream);
