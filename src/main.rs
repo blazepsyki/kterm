@@ -359,6 +359,11 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::CloseTab(index) => {
             if state.sessions.len() <= 1 { return Task::none(); }
+            // Explicitly drop the sender before removing so the worker receives
+            // the channel-closed signal and exits its recv() loop immediately.
+            if let Some(session) = state.sessions.get_mut(index) {
+                session.sender = None;
+            }
             state.sessions.remove(index);
             if state.active_index >= state.sessions.len() { state.active_index = state.sessions.len() - 1; }
             Task::none()
@@ -911,7 +916,7 @@ fn subscription(state: &State) -> Subscription<Message> {
                     _ => None,
                 },
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, text, physical_key, modifiers, .. })
-                    if status == event::Status::Ignored =>
+                =>
                 {
                     if is_remote_secure_attention_shortcut(&physical_key, modifiers) {
                         return Some(Message::RemoteSecureAttention(true));
@@ -926,7 +931,7 @@ fn subscription(state: &State) -> Subscription<Message> {
                     }
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyReleased { key, physical_key, modifiers, .. })
-                    if status == event::Status::Ignored =>
+                =>
                 {
                     if is_remote_secure_attention_shortcut(&physical_key, modifiers)
                         || (is_remote_secure_attention_key(&physical_key) && modifiers.control() && modifiers.alt())

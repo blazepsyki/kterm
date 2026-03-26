@@ -7,7 +7,7 @@
 #### 연결 / 인증
 | 항목 | 비고 |
 |------|------|
-| TCP + TLS 1.2/1.3 업그레이드 | `ironrdp-tls` 크레이트 기반 (`NoCertificateVerification` 내장, 인증서 검증은 R7) |
+| TCP + TLS 1.2/1.3 업그레이드 | `ironrdp-tls` 크레이트 기반 (`NoCertificateVerification` 내장, 인증서 검증은 Phase 7) |
 | 사용자명/비밀번호 인증 | `Credentials::UsernamePassword` |
 | 서버 인증서 공개키 추출 | CredSSP 채널 바인딩용 |
 | 고정 초기 데스크톱 크기 협상 | 1280×720 하드코딩 |
@@ -50,8 +50,8 @@
 #### I/O
 | 항목 | 비고 |
 |------|------|
-| 비동기 Tokio I/O | `ironrdp-tokio` `MovableTokioStream` + `tokio::select!` 이벤트 드리븐 루프 (R1 완료) |
-| TLS 업그레이드 | `ironrdp-tls` 크레이트 기반 (R2 완료) |
+| 비동기 Tokio I/O | `ironrdp-tokio` `MovableTokioStream` + `tokio::select!` 이벤트 드리븐 루프 (Phase 1 완료) |
+| TLS 업그레이드 | `ironrdp-tls` 크레이트 기반 (Phase 1 완료) |
 
 ---
 
@@ -70,7 +70,7 @@
 | 항목 | 비고 |
 |------|------|
 | 창 리사이즈 → 원격 해상도 동기화 | `encode_resize` 코드 존재하나 UI 이벤트 연동 미완 |
-| EGFX 그래픽 파이프라인 (DVC) | `ironrdp-dvc 0.5.0` + `ironrdp-pdu` gfx 타입 + `ironrdp-graphics::zgfx` 조합으로 **Uncompressed 코덱까지 즉시 구현 가능** (R9-B-1). AVC420은 ironrdp-egfx 게시 후 (R9-B-2) |
+| **EGFX 그래픽 파이프라인 (DVC)** | `ironrdp-dvc 0.5.0` + `ironrdp-pdu` gfx 타입 + `ironrdp-graphics::zgfx` 조합으로 **Uncompressed 코덱까지 즉시 구현 가능** (Phase 9-B-1). AVC420은 ironrdp-egfx 게시 후 (Phase 9-B-2) |
 | RemoteFX Progressive (EGFX 경유) | `Codec2Type::RemoteFxProgressive` — DVC GFX 프로세서 필요 |
 | ClearCodec (EGFX 경유) | `Codec1Type::ClearCodec` — **IronRDP에서 추가 중**, DVC GFX 프로세서 필요 |
 | Planar Codec (EGFX 경유) | `Codec1Type::Planar` — DVC GFX 프로세서 필요 |
@@ -135,16 +135,18 @@
 - 프레임 배치 병합(연속 Frames 이벤트 통합, ≈60fps 상한 스로틀링) 완료.
 - Slow-path 비트맵 업데이트 폴백 처리(`try_handle_slowpath_bitmap`) 완료.
 - RDP 오디오 재생: `ironrdp-rdpsnd` + `ironrdp-rdpsnd-native`(cpal 백엔드) 정적 채널로 연결 설정에 통합 완료. **실제 동작 테스트 미완료.**
-- **[R1 완료]** `ironrdp-blocking` → `ironrdp-tokio` 비동기 전환: `spawn_blocking` 제거, `tokio::spawn(async)` 전환, `tokio::select!` 기반 PDU 루프 적용.
-- **[R1 완료]** `ironrdp_tokio::MovableTokioStream` 기반 `UpgradedFramed` 타입 전환, `ReqwestNetworkClient` 교체.
-- **[R2 완료]** 수동 TLS 코드 제거(`tls_upgrade`, `extract_tls_server_public_key`, `mod danger::NoCertificateVerification` — 약 85줄) → `ironrdp-tls` 크레이트 일괄 교체.
-- **[R1/R2 완료]** `Cargo.toml` 직접 의존성 정리: `ironrdp-blocking`, `tokio-rustls`, `x509-cert`, `sspi` 직접 선언 제거; `ironrdp-tokio = "0.8.0"` (reqwest feature), `ironrdp-tls = "0.2.0"` (rustls feature) 추가.
+- **[Phase 1 완료]** `ironrdp-blocking` → `ironrdp-tokio` 비동기 전환: `spawn_blocking` 제거, `tokio::spawn(async)` 전환, `tokio::select!` 기반 PDU 루프 적용.
+- **[Phase 1 완료]** `ironrdp_tokio::MovableTokioStream` 기반 `UpgradedFramed` 타입 전환, `ReqwestNetworkClient` 교체.
+- **[Phase 1 완료]** 수동 TLS 코드 제거(`tls_upgrade`, `extract_tls_server_public_key`, `mod danger::NoCertificateVerification` — 약 85줄) → `ironrdp-tls` 크레이트 일괄 교체.
+- **[Phase 1 완료]** `Cargo.toml` 직접 의존성 정리: `ironrdp-blocking`, `tokio-rustls`, `x509-cert`, `sspi` 직접 선언 제거; `ironrdp-tokio = "0.8.0"` (reqwest feature), `ironrdp-tls = "0.2.0"` (rustls feature) 추가.
+- **[R9-B-1 코드 완료 2026-03-26]** EGFX GFX DVC 프로세서 구현: `ironrdp-dvc = "0.5.0"` 추가, `GfxProcessor: DvcClientProcessor` 구현 (ZGFX + Uncompressed 코덱 + Surface 상태 머신 + FrameAcknowledge). `DrdynvcClient`에 `GfxProcessor` 등록 완료. **실제 서버 동작 확인은 추후 진행.**
+- **[R8-a 코드 완료 2026-03-26]** 탭 닫기 시 `session.sender = None` 명시적 drop 추가 — worker `rx.recv()` 채널이 즉시 닫히도록 수정. **실제 리소스 정리 확인은 추후 진행.**
 
 ## 아키텍처 방향
-- 단기(Phase 1): 기존 `ConnectionEvent` 채널을 재사용해 연결 수명주기 안정화.
-- 중기(Phase 2): 그래픽 전용 이벤트 모델 도입.
+- **단기**: 기존 `ConnectionEvent` 채널을 재사용해 연결 수명주기 안정화.
+- **중기**: 그래픽 전용 이벤트 모델 도입.
   - 예시: `RdpEvent::Frame`, `RdpEvent::Pointer`, `RdpEvent::Disconnected`, `RdpEvent::Error`
-- 장기(Phase 3): 터미널 탭과 원격 그래픽 탭을 렌더링 레벨에서 분리.
+- **장기**: 터미널 탭과 원격 그래픽 탭을 렌더링 레벨에서 분리.
 
 ## 공통 렌더링 모듈화 원칙 (RDP + VNC 공용)
 - 프로토콜별 디코딩(입력: 원격 프레임)과 UI 렌더링(출력: Iced 이미지)을 분리한다.
@@ -163,9 +165,71 @@
 - `FrameUpdate::Cursor { x, y, visible }`
 - `FrameUpdate::Resize { width, height }`
 
-## 단계별 구현
+## 검증 체크리스트
+- [x] RDP 접속 성공 시 원격 화면이 표시된다.
+- [x] 키보드/마우스 입력이 원격 세션에서 정상 동작한다.
+- [ ] 탭 닫기 후 백그라운드 스레드/채널이 정상 종료된다. (코드 수정 완료 2026-03-26, **실제 종료 확인은 추후**)
+- [x] 기존 SSH/Telnet/Serial/Local 동작에 회귀가 없다.
+- [ ] RDP 오디오가 원격 세션 재생음을 로컬에서 출력한다. (코드 통합 완료, 테스트 미완료)
+- [x] 공통 렌더링 모듈이 RDP/VNC 모두에서 재사용 가능하다.
+- [ ] 프로토콜 추가 시 UI 계층 수정이 최소화된다.
+- [ ] EGFX GFX DVC 채널 동작 확인 — Win10/11 서버 접속 후 `[GFX] channel opened` 로그 + 화면 품질 변화 검증 (코드 완료 2026-03-26, **실제 동작 확인은 추후**)
 
-### Phase 1: 연결 기반 구축 (완료)
+## 주의사항
+- 초기에 RDP는 터미널 바이트 스트림과 모델이 달라서 별도 이벤트 계층이 필요하다.
+- 테스트한 XRDP(LXQt) 조합은 로그인 화면 → 데스크톱 전환 시 세션 재활성화 PDU를 보내지 않았다. 따라서 이 구간의 NumLock 상태 변화는 화면 업데이트만으로 나타나며, 프로토콜 이벤트 기반 자동 감지는 기대할 수 없다.
+- 이 제약 때문에 현재 구현은 문제를 일으키는 keypad/navigation 충돌 키에만 `TS_SYNC_EVENT`를 선행 전송하는 방향으로 타협했다.
+
+---
+
+## 현재 의존성 vs 목표 의존성
+
+| 현재 사용 | 버전 | 역할 |
+|-----------|------|------|
+| `ironrdp` (meta) | 0.14.0 | connector/session/graphics/pdu 재수출 |
+| `ironrdp-tokio` | 0.8.0 | 비동기 I/O — `Framed`, `connect_begin/finalize` (**Phase 1 완료**) |
+| `ironrdp-tls` | 0.2.0 | TLS 업그레이드 + 인증서 추출 (**Phase 1 완료**) |
+| `ironrdp-core` | 0.1.5 | `ReadCursor`, `Decode` 등 기본 타입 |
+| `ironrdp-rdpsnd` | 0.7.0 | 오디오 정적 채널 |
+| `ironrdp-rdpsnd-native` | 0.5.0 | cpal 오디오 백엔드 |
+
+> **제거됨 (Phase 1)**: `ironrdp-blocking`, `tokio-rustls`, `x509-cert`, `sspi` — Cargo.toml 직접 선언 제거 완료  
+> `tokio-rustls`/`x509-cert`는 `sspi→reqwest→hyper-rustls` / `ironrdp-pdu` 경로로 간접 의존 잔류(바이너리에 포함)
+
+| **추가 예정** | 버전 | 역할 |
+|--------------|------|------|
+| ~~`ironrdp-tokio`~~ | ~~0.8.0~~ | ~~**Tokio 비동기 I/O**~~ — ✅ **Phase 1 완료** |
+| ~~`ironrdp-tls`~~ | ~~0.2.0~~ | ~~**TLS 보일러플레이트**~~ — ✅ **Phase 1 완료** |
+| `ironrdp-cliprdr` | 0.5.0 | **클립보드 공유** (RDPECLIP 정적 채널) |
+| `ironrdp-cliprdr-native` | 0.5.0 | **클립보드 네이티브 백엔드** (OS 클립보드 연동) |
+| `ironrdp-dvc` | 0.5.0 | **동적 가상 채널** (DRDYNVC) — Phase 9-B-1에서 수동 GFX 프로세서 구현 시 **직접 추가 필요** (`DvcClientProcessor` 트레이트); Phase 5 DVC 인프라와 공유 |
+| `ironrdp-displaycontrol` | 0.5.0 | **디스플레이 제어** (동적 해상도 변경, DVC 기반) |
+| `ironrdp-input` | 0.5.0 | **입력 유틸리티** — 수동 FastPath 매핑 교체 |
+| `ironrdp-rdpdr` | 0.5.0 | **드라이브 리다이렉션** (RDPDR 채널) |
+| `ironrdp-rdpdr-native` | 0.5.0 | **드라이브 리다이렉션 네이티브 백엔드** |
+| `ironrdp-egfx` | 0.1.0 (**crates.io 미게시 — 보류**) | EGFX 전체 파이프라인 — `GraphicsPipelineClient` DVC 프로세서 + ZGFX + AVC420 (openh264 feature) — **crates.io 재게시 후 통합** |
+| `openh264` | — | ~~직접 추가~~ — `ironrdp-egfx` 내부 의존성으로 포함 (`openh264-bundled`/`openh264-libloading` feature 선택) |
+
+| **직접 의존성 제거 완료** | 이유 | 비고 |
+|--------------------------|------|------|
+| ~~`ironrdp-blocking`~~ | `ironrdp-tokio`로 대체 — ✅ **Phase 1 완료** | 바이너리에서 완전 제거됨 |
+| ~~`x509-cert`~~ (직접 선언) | `ironrdp-tls`가 내부 처리 — ✅ **Phase 1 완료** | `ironrdp-pdu` 간접 의존으로 바이너리 잡류 |
+| ~~`tokio-rustls`~~ (직접 선언) | `ironrdp-tls`가 래핑 — ✅ **Phase 1 완료** | `sspi → reqwest → hyper-rustls` 간접 의존으로 바이너리 잡류 |
+| ~~`sspi`~~ (직접 선언) | `ironrdp-tokio::reqwest::ReqwestNetworkClient`로 교체 — ✅ **Phase 1 완료** | 간접 의존으로 바이너리 잡류 |
+
+> **⚠️ 의존성 분석 결과**: `cargo tree -i` 확인 결과, `tokio-rustls`는 `sspi → reqwest → hyper-rustls` 체인으로, `x509-cert`는 `ironrdp-pdu`를 통해 이미 간접 의존되고 있음. 따라서 `Cargo.toml`에서 직접 선언만 제거할 수 있으며, 두 크레이트는 컴파일된 바이너리에 계속 포함됨. **실질적 효과는 `kterm` 직접 코드에서 해당 크레이트 API 사용 제거 (코드 단순화)에 있음.**
+
+---
+
+## 단계별 구현 계획
+
+---
+
+## Phase 1: 연결 기반 구축 ✅ 완료
+
+> 기반 연결 흐름 구축 + `ironrdp-blocking` → `ironrdp-tokio` 비동기 전환 + 수동 TLS 코드 → `ironrdp-tls` 크레이트 교체
+
+### 완료 항목
 - [x] UI에서 RDP 접속 정보 입력/전송
 - [x] `ConnectRdp` 메시지 핸들러 추가
 - [x] `connection::rdp::connect_and_subscribe` 연결
@@ -173,9 +237,32 @@
 - [x] IronRDP 실제 핸드셰이크 적용(Connector + TLS upgrade + finalize)
 - [x] ActiveStage 기반 그래픽 프레임 수신 루프 1차 연결(프로브/응답 프레임 송신)
 - [x] ActiveStage 출력을 Iced 렌더링 상태로 직접 브리지
+- [x] `ironrdp-blocking` → `ironrdp-tokio` 비동기 전환 (`tokio::spawn` + `tokio::select!`)
+  - `spawn_blocking` + 동기 루프 → `tokio::spawn` + 비동기 루프
+  - `ironrdp_blocking::Framed<TlsStream>` → `ironrdp_tokio::Framed<MovableTokioStream<TlsStream<TcpStream>>>`
+  - `LocalTokioStream` (`!Send`) → `MovableTokioStream` (Send 바운드 충족)
+  - `loop { try_recv(); read_pdu(); sleep(1ms) }` → `tokio::select! { input = rx.recv() => ..., pdu = framed.read_pdu().await => ... }`
+  - `sspi::ReqwestNetworkClient` → `ironrdp_tokio::reqwest::ReqwestNetworkClient`
+- [x] `ironrdp-tls` 크레이트 기반 TLS 계층 교체 (수동 보일러플레이트 ~85줄 제거)
+  - 제거: `fn tls_upgrade()` (~30줄), `fn extract_tls_server_public_key()` (~15줄), `mod danger::NoCertificateVerification` (~40줄)
+  - `ironrdp_tls::upgrade(stream, server_name).await` → `(TlsStream, Certificate)` 반환
+  - `ironrdp_tls::extract_tls_server_public_key(&cert)` 사용
+- [x] `Cargo.toml` 직접 의존성 정리
+  - 제거: `ironrdp-blocking`, `tokio-rustls`, `x509-cert`, `sspi` (직접 선언)
+  - 추가: `ironrdp-tokio = "0.8.0"` (reqwest feature), `ironrdp-tls = "0.2.0"` (rustls feature)
 - [ ] 연결 실패/인증 실패/종료 사유 세분화
 
-### Phase 2: 그래픽 파이프라인 (완료)
+### 기대 효과
+- CPU 폴링 오버헤드 제거 (idle 시 0% CPU), `spawn_blocking` 스레드풀 점유 해소
+- 입력 응답 지연 최소화 (sleep(1ms) 제거)
+- 향후 async 채널(DVC, CLIPRDR 등)과 자연스러운 통합
+
+> ⚠️ **보안 참고**: `ironrdp-tls` 내부적으로 `NoCertificateVerification` 사용 중. 실질적 서버 인증서 검증 활성화는 **Phase 7**에서 진행.
+
+---
+
+## Phase 2: 그래픽 파이프라인 ✅ 완료
+
 - [x] 공통 렌더링 모듈 `remote_display` 생성
 - [x] RDP/VNC 공용 `FrameUpdate` 타입 확정(초기: Full 프레임)
 - [x] `RemoteDisplayState`(프레임 버퍼) 구현
@@ -188,200 +275,46 @@
 - [x] Dirty Rect 부분 텍스처 업로드로 GPU 대역폭 최소화
 - [x] Slow-path 비트맵 업데이트 폴백 처리(RDP6/RLE 16/24bpp/BGRX)
 - [x] 프레임 스로틀링(≈60fps 상한, 16ms 타이머 + 50ms drain)
-- [ ] 프레임 스로틀(30fps 상한) 정교화(Drop 정책 포함)
 
-### Phase 2.5: VNC 대비 공통화 검증
+---
+
+## Phase 2.5: VNC 대비 공통화 검증
+
 - [ ] 더미 백엔드(테스트 프레임 생성기)로 공통 렌더러 단독 검증
 - [ ] RDP 백엔드를 공통 렌더러에 연결
 - [ ] VNC 백엔드 연결 시 코드 변경 최소화(목표: UI 코드 변경 0 또는 극소)
 
-### Phase 3: 입력/상호작용 (부분 완료)
+---
+
+## Phase 3: 입력/상호작용 (부분 완료)
+
+> 수동 FastPath 매핑 + `ironrdp-input` 크레이트 활용으로 단계적 개선
+
+### 완료 항목
 - [x] 키보드 입력을 RDP FastPath(스캔코드/유니코드)로 기본 매핑
 - [x] 마우스 이동/클릭/휠 이벤트 기본 매핑
-- [x] XRDP NumLock 불일치 완화: NumPad/Navigation 충돌 키(`0x47..0x53`) 입력 직전 lock-state sync
-- [ ] 포커스 및 입력 캡처 정책 정리
+- [x] XRDP NumLock 불일치 완화: NumPad/Navigation 충돌 키(`0x47..0x53`) key-down 직전 `TS_SYNC_EVENT` 전송
+- [x] 포커스 및 입력 캡처 정책 정리 — 원격 세션 중 모든 키보드 입력을 원격으로 전달
+- [x] `ironrdp-input = "0.5.0"` 직접 의존성 추가; `rdp.rs` 입력 파이프라인에서 `Database`, `Operation`, `Scancode` 등 `ironrdp-input` 타입 직접 사용으로 전환
+- [x] pre-keydown sync / modifier release 경로의 중복 로직 정리
 
-평가:
-현재 구현은 실사용 기준의 기본 입력 경로는 갖추고 있으며, 이번 작업으로 XRDP(LXQt) 환경에서 발생하던 NumLock 불일치도 문제를 일으키는 keypad/navigation 충돌 키 범위에서 완화되었습니다.
-다만 이 Phase를 "완료"로 보기에는 부족합니다. 문서 하단의 리팩토링 계획 기준으로 보면, `ironrdp-input` 크레이트 전환, IME 조합 상태/후보창 처리, 추가 복합 키 조합/캡처 정책 정리는 아직 남아 있습니다.
-즉, 현재 상태는 "기본 입력 동작 완료 + 특정 XRDP 결함 완화 완료"이며, 원래 의도한 R3 전체 범위는 미완입니다.
-
-### Phase 4: 세션 품질
-- [ ] 윈도우 리사이즈를 원격 해상도 변경으로 반영
-- [ ] 탭 전환/닫기 시 리소스 누수 없는 종료
-- [ ] 재접속 UX 및 오류 재시도 정책 정리
-
-### Phase 5: 품질 고도화 (후속)
-- [ ] 포커스/입력 캡처 정책 정교화
-- [ ] 키 조합/로케일/IME 입력 정밀 매핑
-- [ ] 스로틀/드롭 정책 튜닝 및 성능 계측
-- [ ] 불안정 네트워크에서 회복력 강화
-- [ ] RDP 오디오 재생 실제 동작 검증(`ironrdp-rdpsnd` + cpal 백엔드)
-
-## 검증 체크리스트
-- [x] RDP 접속 성공 시 원격 화면이 표시된다.
-- [x] 키보드/마우스 입력이 원격 세션에서 정상 동작한다.
-- [ ] 탭 닫기 후 백그라운드 스레드/채널이 정상 종료된다.
-- [x] 기존 SSH/Telnet/Serial/Local 동작에 회귀가 없다.
-- [ ] RDP 오디오가 원격 세션 재생음을 로컬에서 출력한다. (코드 통합 완료, 테스트 미완료)
-- [x] 공통 렌더링 모듈이 RDP/VNC 모두에서 재사용 가능하다.
-- [ ] 프로토콜 추가 시 UI 계층 수정이 최소화된다.
-
-## 주의사항
-- 초기에 RDP는 터미널 바이트 스트림과 모델이 달라서 별도 이벤트 계층이 필요하다.
-- 테스트한 XRDP(LXQt) 조합은 로그인 화면 → 데스크톱 전환 시 세션 재활성화 PDU를 보내지 않았다. 따라서 이 구간의 NumLock 상태 변화는 화면 업데이트만으로 나타나며, 프로토콜 이벤트 기반 자동 감지는 기대할 수 없다.
-- 이 제약 때문에 현재 구현은 문제를 일으키는 keypad/navigation 충돌 키에만 `TS_SYNC_EVENT`를 선행 전송하는 방향으로 타협했다.
-
----
-
-# RDP 리팩토링 계획 (IronRDP 하위 크레이트 전면 활용)
-
-> **작성일**: 2026-03-25  
-> **목표**: 기존 RDP 코드를 IronRDP 생태계의 전용 하위 크레이트로 전면 교체하고, 현재 미지원 기능을 단계적으로 추가한다.
-
-## 현재 의존성 vs 목표 의존성
-
-| 현재 사용 | 버전 | 역할 |
-|-----------|------|------|
-| `ironrdp` (meta) | 0.14.0 | connector/session/graphics/pdu 재수출 |
-| `ironrdp-tokio` | 0.8.0 | 비동기 I/O — `Framed`, `connect_begin/finalize` (**R1 완료**) |
-| `ironrdp-tls` | 0.2.0 | TLS 업그레이드 + 인증서 추출 (**R2 완료**) |
-| `ironrdp-core` | 0.1.5 | `ReadCursor`, `Decode` 등 기본 타입 |
-| `ironrdp-rdpsnd` | 0.7.0 | 오디오 정적 채널 |
-| `ironrdp-rdpsnd-native` | 0.5.0 | cpal 오디오 백엔드 |
-
-> **제거됨 (R1/R2)**: `ironrdp-blocking`, `tokio-rustls`, `x509-cert`, `sspi` — Cargo.toml 직접 선언 제거 완료  
-> `tokio-rustls`/`x509-cert`는 `sspi→reqwest→hyper-rustls` / `ironrdp-pdu` 경로로 간접 의존 잔류(바이너리에 포함)
-
-| **추가 예정** | 버전 | 역할 |
-|--------------|------|------|
-| ~~`ironrdp-tokio`~~ | ~~0.8.0~~ | ~~**Tokio 비동기 I/O**~~ — ✅ **R1 완료** |
-| ~~`ironrdp-tls`~~ | ~~0.2.0~~ | ~~**TLS 보일러플레이트**~~ — ✅ **R2 완료** |
-| `ironrdp-cliprdr` | 0.5.0 | **클립보드 공유** (RDPECLIP 정적 채널) |
-| `ironrdp-cliprdr-native` | 0.5.0 | **클립보드 네이티브 백엔드** (OS 클립보드 연동) |
-| `ironrdp-dvc` | 0.5.0 | **동적 가상 채널** (DRDYNVC) — R9-B-1에서 수동 GFX 프로세서 구현 시 **직접 추가 필요** (`DvcClientProcessor` 트레이트); R5 DVC 인프라와 공유 |
-| `ironrdp-displaycontrol` | 0.5.0 | **디스플레이 제어** (동적 해상도 변경, DVC 기반) |
-| `ironrdp-input` | 0.5.0 | **입력 유틸리티** — 수동 FastPath 매핑 교체 |
-| `ironrdp-rdpdr` | 0.5.0 | **드라이브 리다이렉션** (RDPDR 채널) |
-| `ironrdp-rdpdr-native` | 0.5.0 | **드라이브 리다이렉션 네이티브 백엔드** |
-| `ironrdp-egfx` | 0.1.0 (**crates.io 미게시 — 보류**) | EGFX 전체 파이프라인 — `GraphicsPipelineClient` DVC 프로세서 + ZGFX + AVC420 (openh264 feature) — **crates.io 재게시 후 통합** |
-| `openh264` | — | ~~직접 추가~~ — `ironrdp-egfx` 내부 의존성으로 포함 (`openh264-bundled`/`openh264-libloading` feature 선택) |
-
-| **직접 의존성 제거 완료** | 이유 | 비고 |
-|--------------------------|------|------|
-| ~~`ironrdp-blocking`~~ | `ironrdp-tokio`로 대체 — ✅ **R1 완료** | 바이너리에서 완전 제거됨 |
-| ~~`x509-cert`~~ (직접 선언) | `ironrdp-tls`가 내부 처리 — ✅ **R2 완료** | `ironrdp-pdu` 간접 의존으로 바이너리 잔류 |
-| ~~`tokio-rustls`~~ (직접 선언) | `ironrdp-tls`가 래핑 — ✅ **R2 완료** | `sspi → reqwest → hyper-rustls` 간접 의존으로 바이너리 잔류 |
-| ~~`sspi`~~ (직접 선언) | `ironrdp-tokio::reqwest::ReqwestNetworkClient`로 교체 — ✅ **R1 완료** | 간접 의존으로 바이너리 잔류 |
-
-> **⚠️ 의존성 분석 결과**: `cargo tree -i` 확인 결과, `tokio-rustls`는 `sspi → reqwest → hyper-rustls` 체인으로, `x509-cert`는 `ironrdp-pdu`를 통해 이미 간접 의존되고 있음. 따라서 `Cargo.toml`에서 직접 선언만 제거할 수 있으며, 두 크레이트는 컴파일된 바이너리에 계속 포함됨. **실질적 효과는 `kterm` 직접 코드에서 해당 크레이트 API 사용 제거 (코드 단순화)에 있음.**
-
----
-
-## Phase R1: 비동기 I/O 전환 ✅ 완료
-
-> `ironrdp-blocking` → `ironrdp-tokio` 마이그레이션
-
-### 변경 내용
-1. **`Cargo.toml`**: `ironrdp-blocking` 제거, `ironrdp-tokio = "0.8.0"` 추가
-2. **`rdp.rs` 워커 구조 전환**:
-   - `tokio::task::spawn_blocking` + 동기 루프 → `tokio::spawn` + 비동기 루프
-   - `ironrdp_blocking::Framed<TlsStream>` → `ironrdp_tokio::Framed<MovableTokioStream<TlsStream<TcpStream>>>`
-   - `ironrdp_blocking::connect_begin/connect_finalize` → `ironrdp_tokio::connect_begin/connect_finalize`
-   - `framed.read_pdu()` (블로킹) → `framed.read_pdu().await` (비동기)
-   - `framed.write_all()` → `framed.write_all().await`
-   - `std::net::TcpStream` → `tokio::net::TcpStream`
-   - `sspi::ReqwestNetworkClient` → `ironrdp_tokio::reqwest::ReqwestNetworkClient`
-3. **메인 루프 리팩토링**:
-   - 기존: `loop { try_recv(); read_pdu(); sleep(1ms) }` 폴링
-   - 변경: `tokio::select! { input = rx.recv() => ..., pdu = framed.read_pdu() => ... }`
-   - `set_fast_timeout` / WouldBlock 핸들링 불필요 → 제거
-
-### 실제 변경 결과
-- `UpgradedFramed` = `Framed<MovableTokioStream<ironrdp_tls::TlsStream<tokio::net::TcpStream>>>`
-  - `LocalTokioStream` 사용 시 `!Send` 컴파일 오류 → `MovableTokioStream`으로 교체 (Send 바운드 충족)
-- `cargo check` 및 `cargo run` 성공 (기존 경고 1건 유지)
-
-### 기대 효과
-- CPU 폴링 오버헤드 제거 (idle 시 0% CPU)
-- `spawn_blocking` 스레드풀 점유 해소
-- 입력 응답 지연 최소화 (sleep(1ms) 제거)
-- 향후 async 채널(DVC, CLIPRDR 등)과 자연스러운 통합
-
-### 주의사항
-- `ironrdp-tokio`의 `connect_begin`/`connect_finalize` API 시그니처 확인 필요
-- 기존 `UpgradedFramed` 타입 별칭 전면 교체
-- `sspi::ReqwestNetworkClient`의 비동기 호환성 확인
-
----
-
-## Phase R2: TLS 계층 정리 ✅ 완료
-
-> 수동 TLS 코드 → `ironrdp-tls` 크레이트
-
-### 변경 내용
-1. **`Cargo.toml`**: `ironrdp-tls = { version = "0.2.0", features = ["rustls"] }` 추가; `tokio-rustls`, `x509-cert`, `sspi` 직접 선언 제거
-2. **`rdp.rs`에서 제거된 코드**:
-   - `fn tls_upgrade()` (~30줄)
-   - `fn extract_tls_server_public_key()` (~15줄)
-   - `mod danger { NoCertificateVerification }` (~40줄)
-3. **교체**: `ironrdp_tls::upgrade(stream, server_name).await` → `(TlsStream, Certificate)` 반환
-4. **공개키 추출**: `ironrdp_tls::extract_tls_server_public_key(&cert)` 사용
-
-### 실제 변경 결과
-- 수동 TLS 보일러플레이트 약 85줄 제거 완료
-- `Cargo.toml` 직접 선언 4개 제거 (`ironrdp-blocking`, `tokio-rustls`, `x509-cert`, `sspi`)
-- R1과 동시 완료 (`cargo check` / `cargo run` 성공)
-
-> ⚠️ **보안 참고**: `ironrdp-tls` 내부적으로 `NoCertificateVerification` 사용 중. 실질적 서버 인증서 검증 활성화는 **R7**에서 진행.
-
----
-
-## Phase R3: 입력 처리 개선 (부분 완료)
-
-> 수동 FastPath 매핑 → `ironrdp-input` 크레이트
-
-### 상태 평가
-- 완료된 범위
-   - 수동 FastPath 기반의 기본 키보드/마우스 입력 경로는 이미 동작 중입니다.
-   - XRDP(LXQt)에서 로그인 화면 이후 NumLock 상태가 어긋나던 문제는, NumPad/Navigation 충돌 스캔코드(`0x47..0x53`)에 한해 key-down 직전 `TS_SYNC_EVENT`를 보내는 방식으로 완화했습니다.
-   - `Cargo.toml`에 `ironrdp-input = "0.5.0"`를 직접 의존성으로 추가했고, `rdp.rs` 백엔드 입력 파이프라인은 `ironrdp` 메타 크레이트 재수출 대신 `ironrdp-input` 타입(`Database`, `Operation`, `Scancode` 등)을 직접 사용하도록 전환했습니다.
-- 미완 범위
-   - `main.rs`의 수동 스캔코드 매핑은 그대로 유지되고 있습니다.
-   - `rdp.rs`도 상위 이벤트를 어떤 스캔코드로 보낼지 결정하는 정책 자체는 여전히 수동 매핑에 의존합니다.
-   - IME 조합 입력, 복합 키 조합, 입력 캡처 정책 정리는 아직 남아 있습니다.
-
-결론:
-이번에 해결한 XRDP NumLock 이슈는 분명히 R3 범주의 문제였지만, 이는 R3 전체 완료가 아니라 "현재 수동 입력 경로를 유지한 채 특정 결함을 완화한 것"에 가깝습니다.
-따라서 R3의 현재 상태는 완료가 아니라 부분 완료로 보는 것이 정확합니다.
-
-### 변경 내용
-1. **1차 적용 완료**
-   - `Cargo.toml`에 `ironrdp-input = "0.5.0"` 직접 의존성 추가
-   - `ironrdp` 메타 크레이트의 `input` feature 제거
-   - `rdp.rs`에서 `Database`, `Operation`, `Scancode`, `synchronize_event` 등을 `ironrdp-input` 직접 import로 전환
-   - pre-keydown sync / modifier release 경로의 중복 로직 정리
-2. **후속 예정**
-   - `main.rs` `map_key_to_rdp_scancode()` 개선
-   - `ironrdp-input`의 키 매핑 테이블 활용
-   - IME 조합 입력 기초 지원 (한국어/일본어/중국어)
-3. **추가 입력 지원**:
-   - 마우스 수평 휠 (`PointerFlags::HORIZONTAL_WHEEL`)
-   - 복합 키 조합 (Ctrl+Alt+Del, Win 키 등)
-   - Extended 키 플래그 정밀화
+### 미완 항목
+- [ ] `main.rs` `map_key_to_rdp_scancode()` 개선 (`ironrdp-input` 키 매핑 테이블 활용)
+- [ ] IME 조합 입력 기초 지원 (한국어/일본어/중국어)
+- [ ] 마우스 수평 휠 (`PointerFlags::HORIZONTAL_WHEEL`)
+- [ ] 복합 키 조합 정밀 매핑 (Ctrl+Alt+Del, Win 키 등)
+- [ ] Extended 키 플래그 정밀화
 
 ### 기대 효과
 - 입력 매핑 코드 단순화
 - IME/다국어 입력 지원 기초 확보
 - modifier 상태 추적 정확도 향상
 
-### 현재 판단
-- 이 계획은 여전히 유효하지만, 우선순위는 "전체 입력 스택 교체"보다 "현재 수동 매핑의 남은 결함을 필요한 범위만 보완"으로 낮아졌습니다.
-- 특히 XRDP NumLock 문제는 서버가 전환 PDU를 보내지 않는다는 제약이 확인되었으므로, `ironrdp-input` 도입만으로 완전히 해결된다고 보기는 어렵습니다.
+**평가**: 기본 입력 경로와 XRDP NumLock 완화는 완료되었습니다. 현재 상태는 "기본 입력 동작 완료 + 특정 XRDP 결함 완화 완료"이며, `ironrdp-input` 전면 전환·IME 조합·복합 키 정책 정리는 미완입니다. XRDP NumLock 문제는 서버가 전환 PDU를 보내지 않는다는 제약이 확인되었으므로, `ironrdp-input` 도입만으로 완전히 해결되지는 않습니다.
 
 ---
 
-## Phase R4: 클립보드 공유
+## Phase 4: 클립보드 공유
 
 > `ironrdp-cliprdr` + `ironrdp-cliprdr-native` 통합
 
@@ -403,7 +336,7 @@
 
 ---
 
-## Phase R5: 동적 가상 채널 + 디스플레이 제어
+## Phase 5: 동적 가상 채널 + 디스플레이 제어
 
 > `ironrdp-dvc` + `ironrdp-displaycontrol`로 동적 해상도 변경
 
@@ -426,7 +359,7 @@
 
 ---
 
-## Phase R6: 드라이브 리다이렉션
+## Phase 6: 드라이브 리다이렉션
 
 > `ironrdp-rdpdr` + `ironrdp-rdpdr-native`
 
@@ -442,7 +375,7 @@
 
 ---
 
-## Phase R7: 보안 및 인증 강화
+## Phase 7: 보안 및 인증 강화
 
 ### 변경 내용
 1. **NLA/CredSSP 활성화**:
@@ -460,7 +393,7 @@
 
 ---
 
-## Phase R8: 세션 안정성 및 UX
+## Phase 8: 세션 안정성 및 UX
 
 ### 변경 내용
 1. **리소스 정리**:
@@ -479,7 +412,7 @@
 
 ---
 
-## Phase R9: 그래픽 코덱 확장 (EGFX + NSCodec)
+## Phase 9: 그래픽 코덱 확장 (EGFX + NSCodec)
 
 > EGFX(GFX) 동적 가상 채널 파이프라인 구축 및 고급 코덱 지원
 
@@ -498,7 +431,7 @@ IronRDP 생태계의 그래픽 코덱 지원 현황 (2026-03-26 기준):
 | | AVC420 / AVC444 | 🔧 추가 중 | H.264 기반의 비디오 스트리밍 코덱 |
 
 > **핵심 변경**: NSCodec, ClearCodec, AVC420/AVC444가 IronRDP에서 **공식적으로 추가 작업 중**이므로, kterm에서 이들 코덱을 직접 구현할 필요가 없어짐. IronRDP 공식 릴리스 후 크레이트 업데이트만으로 통합 가능.  
-> **R9 구성**: R9-B-1 (published crates 기반 Uncompressed 코덱 수동 GFX 프로세서 — **즉시 구현 가능**) → R9-B-2 (ironrdp-egfx 기반 교체 + AVC420 — ⏸ 보류) → R9-C (ClearCodec + AVC444 통합 대기) → R9-A (NSCodec 통합 대기)
+> **Phase 9 구성**: Phase 9-B-1 (published crates 기반 Uncompressed 코덱 수동 GFX 프로세서 — **즉시 구현 가능**) → Phase 9-B-2 (ironrdp-egfx 기반 교체 + AVC420 — ⏸ 보류) → Phase 9-C (ClearCodec + AVC444 통합 대기) → Phase 9-A (NSCodec 통합 대기)
 
 #### IronRDP 크레이트별 지원 범위 (기존)
 
@@ -511,9 +444,9 @@ IronRDP 생태계의 그래픽 코덱 지원 현황 (2026-03-26 기준):
 | **EGFX 파이프라인 (신규 크레이트)** | `ironrdp-egfx` (GitHub master, **crates.io 미게시**) | `GraphicsPipelineClient` (`DvcClientProcessor` 완전 구현체) + MS-RDPEGFX 전체 PDU 23종 + ZGFX 내장 + AVC420 feature 지원 (`openh264-bundled`/`openh264-libloading`) — 약 1달 전 추가됨 (PR #1057) |
 | **NSCodec** | (추가 중) | IronRDP에서 디코딩 구현 추가 작업 진행 중 |
 | **ClearCodec** | (추가 중) | IronRDP에서 디코딩 구현 추가 작업 진행 중 |
-| **DVC 인프라 + 수동 GFX 프로세서** | `ironrdp-dvc` | `DvcProcessor` / `DvcClientProcessor` 트레이트 — R9-B-1 수동 구현 시 직접 사용; R9-B-2에서 ironrdp-egfx 내부 의존성으로도 포함 |
+| **DVC 인프라 + 수동 GFX 프로세서** | `ironrdp-dvc` | `DvcProcessor` / `DvcClientProcessor` 트레이트 — Phase 9-B-1 수동 구현 시 직접 사용; Phase 9-B-2에서 ironrdp-egfx 내부 의존성으로도 포함 |
 
-### 단계 R9-A: NSCodec 디코딩 통합 (IronRDP 추가 중 — DVC 불필요)
+### 단계 Phase 9-A: NSCodec 디코딩 통합 (IronRDP 추가 중 — DVC 불필요)
 
 > IronRDP에서 NSCodec 디코딩을 **공식 추가 작업 중**. kterm 자체 구현 불필요.
 > 현재 `build_config()`에서 NSCodec 협상은 비활성화 상태 — IronRDP 공식 릴리스 후 활성화 예정.
@@ -530,7 +463,7 @@ IronRDP 생태계의 그래픽 코덱 지원 현황 (2026-03-26 기준):
    - IronRDP NSCodec 지원 릴리스 추적 및 적용 시점 확정
    - NSCodec 활성화 후 실제 서버에서 화면 품질/안정성 검증
 
-### 단계 R9-B-1: 최소 수동 GFX 프로세서 구현 (published crates 기반) — ✅ **즉시 구현 가능**
+### 단계 Phase 9-B-1: 최소 수동 GFX 프로세서 구현 (published crates 기반) — ✅ **즉시 구현 가능**
 
 > `ironrdp-egfx` 없이도 **현재 crates.io에 게시된 크레이트만으로** Uncompressed 코덱 지원 EGFX 프로세서를 구현할 수 있다.
 > `ironrdp-dvc 0.5.0` + `ironrdp-pdu::rdp::vc::dvc::gfx` (PDU 전체 타입) + `ironrdp-graphics::zgfx::Decompressor` 직접 조합.
@@ -547,7 +480,7 @@ IronRDP 생태계의 그래픽 코덱 지원 현황 (2026-03-26 기준):
 | Capability 협상 | `CapabilitiesAdvertisePdu` + `CapabilitySet::V8` | IronRDP PDU 타입으로 직접 인코딩 |
 | FrameAcknowledge 전송 | `ClientPdu::FrameAcknowledge(FrameAcknowledgePdu { ... })` | `FrameMarker::End` 수신 시 응답 |
 
-#### ironrdp-egfx 없이는 불가능한 범위 (R9-B-2 / R9-C 대기)
+#### ironrdp-egfx 없이는 불가능한 범위 (Phase 9-B-2 / Phase 9-C 대기)
 
 | 기능 | 이유 |
 |------|------|
@@ -592,28 +525,30 @@ impl DvcClientProcessor for GfxProcessor {
 }
 ```
 
-#### 작업 목록 (즉시 착수 가능)
+#### 작업 목록 ✅ 2026-03-26 구현 완료 (검증 추후)
 
-1. `Cargo.toml`에 `ironrdp-dvc = "0.5.0"` 직접 추가 (R5와 공유)
-2. `src/connection/rdp.rs`에 `GfxProcessor: DvcClientProcessor` 구현
+1. ~~`Cargo.toml`에 `ironrdp-dvc = "0.5.0"` 직접 추가 (Phase 5와 공유)~~ ✅ 완료
+2. ~~`src/connection/rdp.rs`에 `GfxProcessor: DvcClientProcessor` 구현~~ ✅ 완료
    - ZGFX 전처리 (`Decompressor` 내장)
    - `ServerPdu` 디코딩 분기문
    - `Codec1Type::Uncompressed` — `FrameUpdate::Rect` 생성
    - Surface 상태 머신 (Create / Delete / Map / ResetGraphics)
    - `FrameAcknowledge` 자동 전송
    - Capability 협상 (V8 기본)
-3. `build_config()`에서 EGFX DVC 채널 등록 (`DrdynvcClient`에 `GfxProcessor` 추가)
-4. 미지원 코덱 수신 시 경고 로그 (R9-B-2 / R9-C 에서 제거 예정)
+3. ~~`build_config()`에서 EGFX DVC 채널 등록 (`DrdynvcClient`에 `GfxProcessor` 추가)~~ ✅ 완료
+4. 미지원 코덱 수신 시 경고 로그 (`eprintln!`) ✅ 완료 (Phase 9-B-2 / Phase 9-C 에서 제거 예정)
 
-> **ironrdp-egfx 게시 후**: R9-B-2에서 `GfxProcessor`를 `GraphicsPipelineClient`로 교체 → AVC420 추가, Surface 캐시 처리 개선
+> **실제 서버 동작 확인**: Win10/11 XRDP 서버 접속 후 `[GFX] channel opened` 로그 + 화면 품질 변화 검증 — **추후 진행**
+
+> **ironrdp-egfx 게시 후**: Phase 9-B-2에서 `GfxProcessor`를 `GraphicsPipelineClient`로 교체 → AVC420 추가, Surface 쾐시 처리 개선
 
 ---
 
-### 단계 R9-B-2: ironrdp-egfx 기반 전면 교체 + AVC420 추가 — ⏸ **보류** (`ironrdp-egfx` crates.io 게시 대기)
+### 단계 Phase 9-B-2: ironrdp-egfx 기반 전면 교체 + AVC420 추가 — ⏸ **보류** (`ironrdp-egfx` crates.io 게시 대기)
 
 > `ironrdp-egfx` 크레이트가 현재 **재작업 중** (`publish = false`). crates.io 게시 완료 후 착수.
-> R9-B-1에서 구현한 수동 `GfxProcessor`를 `GraphicsPipelineClient`로 교체하고, AVC420을 추가하는 단계.
-> 이 단계는 **ironrdp-egfx가 이미 지원하는 코덱**만 대상으로 함 — 추가 중인 코덱(ClearCodec, AVC444)은 R9-C 참조.
+> Phase 9-B-1에서 구현한 수동 `GfxProcessor`를 `GraphicsPipelineClient`로 교체하고, AVC420을 추가하는 단계.
+> 이 단계는 **ironrdp-egfx가 이미 지원하는 코덱**만 대상으로 함 — 추가 중인 코덱(ClearCodec, AVC444)은 Phase 9-C 참조.
 
 #### `ironrdp-egfx` 크레이트 현황 (2026-03-26)
 - **저장소**: `crates/ironrdp-egfx` in IronRDP GitHub (PR #1057, ~1달 전 추가)
@@ -621,16 +556,16 @@ impl DvcClientProcessor for GfxProcessor {
 - **제공 API**: `GraphicsPipelineClient` (`DvcClientProcessor` 완전 구현체), `GraphicsPipelineHandler`, `BitmapUpdate`, `Surface`, `CodecCapabilities`
 - **내장 기능**: ZGFX 압축 해제, 능력 협상(V8~V10.7), Surface 상태 관리, FrameAcknowledge 자동 전송
 
-#### 이 단계에서 추가할 코덱 범위 (R9-B-1 대비)
-| 코덱 | ironrdp-egfx 상태 | R9-B-1과의 차이 |
+#### 이 단계에서 추가할 코덱 범위 (Phase 9-B-1 대비)
+| 코덱 | ironrdp-egfx 상태 | Phase 9-B-1과의 차이 |
 |------|-------------------|-----------------|
-| `Codec1Type::Uncompressed` | ✅ 지원 | R9-B-1에서 수동 구현 → `GraphicsPipelineClient` 자동 처리로 교체 |
-| `Codec1Type::Avc420` | ✅ 지원 (openh264 feature) | R9-B-1에서 경고 로그 → `openh264-libloading` feature + `OpenH264Decoder` 주입 시 자동 디코딩 |
+| `Codec1Type::Uncompressed` | ✅ 지원 | Phase 9-B-1에서 수동 구현 → `GraphicsPipelineClient` 자동 처리로 교체 |
+| `Codec1Type::Avc420` | ✅ 지원 (openh264 feature) | Phase 9-B-1에서 경고 로그 → `openh264-libloading` feature + `OpenH264Decoder` 주입 시 자동 디코딩 |
 
 #### 게시 후 통합전략 (사전 정리)
 ```
-R9-B-1:     kterm의 수동 GfxProcessor (Uncompressed만 지원, ~수백 줄)
-R9-B-2:     ironrdp-egfx::GraphicsPipelineClient로 교체 + GraphicsPipelineHandler 구현 (kterm 고유 로직만)
+Phase 9-B-1:     kterm의 수동 GfxProcessor (Uncompressed만 지원, ~수백 줄)
+Phase 9-B-2:     ironrdp-egfx::GraphicsPipelineClient로 교체 + GraphicsPipelineHandler 구현 (kterm 고유 로직만)
 효과:       Surface 캐시, FrameAcknowledge, ZGFX 등을 GraphicsPipelineClient가 자동 처리 → kterm 코드 대폭 단순화
 ```
 
@@ -644,15 +579,15 @@ R9-B-2:     ironrdp-egfx::GraphicsPipelineClient로 교체 + GraphicsPipelineHan
 3. DVC 채널에 `GraphicsPipelineClient` 등록 (`DrdynvcClient`)
 4. `build_config()` 수정 — EGFX 활성화
 
-### 단계 R9-C: EGFX 추가 코덱 (ClearCodec + AVC444) — ⏸ **보류** (IronRDP/`ironrdp-egfx` 추가 중 대기)
+### 단계 Phase 9-C: EGFX 추가 코덱 (ClearCodec + AVC444) — ⏸ **보류** (IronRDP/`ironrdp-egfx` 추가 중 대기)
 
-> R9-B 완료 후, **IronRDP에서 추가 작업 중**인 코덱이 `ironrdp-egfx`에 포함되면 kterm `GraphicsPipelineHandler`의 `on_unhandled_pdu` 경로에서 자동 처리 경로로 전환됨.
+> Phase 9-B 완료 후, **IronRDP에서 추가 작업 중**인 코덱이 `ironrdp-egfx`에 포함되면 kterm `GraphicsPipelineHandler`의 `on_unhandled_pdu` 경로에서 자동 처리 경로로 전환됨.
 
 #### 대기 중인 코덱 현황
 | 코덱 | IronRDP 상태 | ironrdp-egfx 상태 | kterm 대응 |
 |------|-------------|-------------------|-----------|
-| ClearCodec | 🔧 추가 중 | 미구현 (on_unhandled_pdu) | R9-B에서 경고 로그 출력 → ironrdp-egfx 포함 시 자동 처리 |
-| AVC444 / AVC444v2 | 🔧 추가 중 | 미구현 (on_unhandled_pdu) | R9-B에서 경고 로그 출력 → ironrdp-egfx 포함 시 자동 처리 |
+| ClearCodec | 🔧 추가 중 | 미구현 (on_unhandled_pdu) | Phase 9-B에서 경고 로그 출력 → ironrdp-egfx 포함 시 자동 처리 |
+| AVC444 / AVC444v2 | 🔧 추가 중 | 미구현 (on_unhandled_pdu) | Phase 9-B에서 경고 로그 출력 → ironrdp-egfx 포함 시 자동 처리 |
 | Planar | 미지원 | 미구현 | 지원 계획 없음 (희귀 코덱) |
 | RemoteFxProgressive (WireToSurface2) | 미지원 | on_wire_to_surface2 위임 | 미정 |
 
@@ -671,48 +606,47 @@ R9-B-2:     ironrdp-egfx::GraphicsPipelineClient로 교체 + GraphicsPipelineHan
 
 ### 주의사항
 - ~~EGFX GFX 프로세서는 IronRDP에 전용 크레이트가 없으므로 kterm 자체 구현 필요~~ → **`ironrdp-egfx` 크레이트가 `GraphicsPipelineClient`로 완전 구현 제공** — kterm은 `GraphicsPipelineHandler` 구현만 필요
-- **`ironrdp-egfx` crates.io 미게시**: R9-B/R9-C 모두 게시 후 착수 — git 의존성은 사용하지 않음
-- **R9-B 범위**: 현재 ironrdp-egfx가 지원하는 Uncompressed + AVC420만 구현 대상. ClearCodec/AVC444는 R9-C로 분리
-- **R9-C 범위**: ironrdp-egfx에 ClearCodec/AVC444가 추가되면 `on_unhandled_pdu` 분기 제거만으로 활성화 가능
+- **`ironrdp-egfx` crates.io 미게시**: Phase 9-B/Phase 9-C 모두 게시 후 착수 — git 의존성은 사용하지 않음
+- **Phase 9-B 범위**: 현재 ironrdp-egfx가 지원하는 Uncompressed + AVC420만 구현 대상. ClearCodec/AVC444는 Phase 9-C로 분리
+- **Phase 9-C 범위**: ironrdp-egfx에 ClearCodec/AVC444가 추가되면 `on_unhandled_pdu` 분기 제거만으로 활성화 가능
 - Planar 코덱은 현재 IronRDP/ironrdp-egfx 모두 지원 계획 없음 — `on_unhandled_pdu` 위임 유지
 - `openh264-bundled` feature는 Cisco 특허 커버리지 없음; 배포 환경은 `openh264-libloading` 사용
-- R5 (DVC 인프라 등록)가 선행되어야 R9-B에서 `GraphicsPipelineClient`를 DVC에 등록 가능
-- R9-A (NSCodec), R9-C (ClearCodec/AVC444) 모두 **IronRDP 업데이트 타이밍에 의존** — 릴리스 추적 필요
+- Phase 5 (DVC 인프라 등록)가 선행되어야 Phase 9-B에서 `GraphicsPipelineClient`를 DVC에 등록 가능
+- Phase 9-A (NSCodec), Phase 9-C (ClearCodec/AVC444) 모두 **IronRDP 업데이트 타이밍에 의존** — 릴리스 추적 필요
 
 ---
 
 ## 실행 우선순위 및 의존관계
 
 ```
-R1 (비동기 전환 ✅) ──────────┐
-                              ├──→ R3 (입력 개선)
-R2 (TLS 정리 ✅) ─────────────┤
-                              ├──→ R4 (클립보드)
+Phase 1 (연결 기반 구축 ✅) ──────────────┬
+                              ├──→ Phase 3 (입력 개선)
+                              ├──→ Phase 4 (클립보드)
                               │
-                              ├──→ R5 (DVC + 디스플레이 제어) ──→ R6 (드라이브 리다이렉션)
+                              ├──→ Phase 5 (DVC + 디스플레이 제어) ──→ Phase 6 (드라이브 리다이렉션)
                               │         │
-                              │         └──→ R9-B-2/R9-C (⏸ ironrdp-egfx crates.io 재게시 대기)
+                              │         └──→ Phase 9-B-2/Phase 9-C (⏸ ironrdp-egfx crates.io 재게시 대기)
                               │
-                              ├──→ R7 (보안 강화)
+                              ├──→ Phase 7 (보안 강화)
                               │
-                              ├──→ R8 (세션 안정성)
+                              ├──→ Phase 8 (세션 안정성)
                               │
-                              ├──→ R9-B-1 (최소 수동 GFX, 즉시 착수 가능 ✅)
-                              │         ※ published crates 기반, R5 완료 불필요
+                              ├──→ Phase 9-B-1 (최소 수동 GFX, 즉시 착수 가능 ✅)
+                              │         ※ published crates 기반, Phase 5 완료 불필요
                               │
-                              └──→ R9-A (NSCodec) ← IronRDP 릴리스 대기 (추가 중)
+                              └──→ Phase 9-A (NSCodec) ← IronRDP 릴리스 대기 (추가 중)
 ```
 
-- **R1 + R2 완료** — 기반 전환 완료. R3~R9 착수 가능.
-- **R9-B-1**: published crates만으로 **즉시 착수 가능** — `ironrdp-dvc 0.5.0` + `ironrdp-pdu` gfx + `ironrdp-graphics::zgfx`로 Uncompressed 코덱 EGFX 처리기 구현. R5(DVC 인프라) 완료 여부와 무관하게 독립 구현 가능.
-- **R9-B-2 + R9-C**: `ironrdp-egfx` 재작업 중 crates.io 미게시 — **게시 완료 후 R5 완료 시점에 맞춰 통합**.
-  - R9-B-2: R9-B-1 수동 구현을 GraphicsPipelineClient로 교체 + AVC420 추가
-  - R9-C: ClearCodec + AVC444 추가 시 자동 활성화 (on_unhandled_pdu 분기 제거)
-- **R9-A (NSCodec)**: IronRDP에서 **추가 작업 중** — 공식 릴리스 후 크레이트 업데이트 + 협상 활성화만으로 통합.
-- **R3**은 R1 완료 후 입력 루프가 비동기로 전환된 상태에서 진행.
-- **R4**는 R1 완료 후 정적 채널 추가로 진행 가능.
-- **R5**는 DVC 인프라가 필요하므로 R1 이후 진행. R5 완료 후 R6 및 **R9-B/R9-C** 착수 (게시 시점에 연동).
-- **R7, R8**은 기능적으로 독립이나 R1 비동기 전환 후가 효율적.
+- **Phase 1 완료** — 기반 전환 완료. Phase 3~9 착수 가능.
+- **Phase 9-B-1**: published crates만으로 **즉시 착수 가능** — `ironrdp-dvc 0.5.0` + `ironrdp-pdu` gfx + `ironrdp-graphics::zgfx`로 Uncompressed 코덱 EGFX 처리기 구현. Phase 5(DVC 인프라) 완료 여부와 무관하게 독립 구현 가능.
+- **Phase 9-B-2 + Phase 9-C**: `ironrdp-egfx` 재작업 중 crates.io 미게시 — **게시 완료 후 Phase 5 완료 시점에 맞춰 통합**.
+  - Phase 9-B-2: Phase 9-B-1 수동 구현을 GraphicsPipㅌelineClient로 교체 + AVC420 추가
+  - Phase 9-C: ClearCodec + AVC444 추가 시 자동 활성화 (on_unhandled_pdu 분기 제거)
+- **Phase 9-A (NSCodec)**: IronRDP에서 **추가 작업 중** — 공식 릴리스 후 크레이트 업데이트 + 협상 활성화만으로 통합.
+- **Phase 3**은 Phase 1 완료 후 입력 루프가 비동기로 전환된 상태에서 진행.
+- **Phase 4**는 Phase 1 완료 후 정적 채널 추가로 진행 가능.
+- **Phase 5**는 DVC 인프라가 필요하므로 Phase 1 이후 진행. Phase 5 완료 후 Phase 6 및 **Phase 9-B/Phase 9-C** 착수 (게시 시점에 연동).
+- **Phase 7, Phase 8**은 기능적으로 독립이나 Phase 1 비동기 전환 후가 효율적.
 
 ---
 
@@ -723,18 +657,18 @@ R2 (TLS 정리 ✅) ─────────────┤
 ```
 rdp.rs
 ├── connect_and_subscribe()        // 진입점 (변경 없음)
-├── async fn run_rdp_worker()      // ★ spawn_blocking → tokio::spawn (R1 완료)
-│   ├── connect()                  // ironrdp-tokio + ironrdp-tls 비동기 핸드셰이크 (R1/R2 완료)
-│   ├── tokio::select! 메인 루프   // ★ 폴링 → 이벤트 드리븐 (R1 완료)
-│   │   ├── input branch           // ironrdp-input 활용 (R3)
-│   │   ├── pdu branch             // ActiveStage 출력 처리 + GFX DVC 처리 (R9-B)
-│   │   └── shutdown branch        // CancellationToken (R8)
-│   └── cleanup                    // graceful shutdown (R8)
+├── async fn run_rdp_worker()      // ★ spawn_blocking → tokio::spawn (Phase 1 완료)
+│   ├── connect()                  // ironrdp-tokio + ironrdp-tls 비동기 핸드셸이크 (Phase 1 완료)
+│   ├── tokio::select! 메인 루프   // ★ 폴링 → 이벤트 드리븐 (Phase 1 완료)
+│   │   ├── input branch           // ironrdp-input 활용 (Phase 3)
+│   │   ├── pdu branch             // ActiveStage 출력 처리 + GFX DVC 처리 (Phase 9-B)
+│   │   └── shutdown branch        // CancellationToken (Phase 8)
+│   └── cleanup                    // graceful shutdown (Phase 8)
 ├── try_handle_slowpath_bitmap()   // 유지 (IronRDP 한계 보완)
 ├── 픽셀 변환 함수들               // 유지 (rgb24/bgr24/rgb16/bgrx → RGBA)
 ├── (제거 완료) tls_upgrade / NoCertificateVerification / extract_tls_server_public_key
 │
-└── (R9 추가 예정 — ironrdp-egfx 게시 후)
+└── (Phase 9 추가 예정 — ironrdp-egfx 게시 후)
     ├── egfx_handler.rs            // GraphicsPipelineHandler 구현 — FrameUpdate 변환기 (kterm 고유)
     │   ├── on_bitmap_updated()    // BitmapUpdate → FrameUpdate::Rect/Full
     │   ├── on_reset_graphics()    // 버퍼 리셋 + FrameUpdate::Resize
@@ -777,15 +711,15 @@ pub enum ConnectionEvent {
 
 | 위험 | 영향 | 완화 | 상태 |
 |------|------|------|------|
-| ~~`ironrdp-tokio` API가 `ironrdp-blocking`과 크게 다를 수 있음~~ | ~~R1 지연~~ | ~~IronRDP GitHub 예제 코드 참조, 점진적 마이그레이션~~ | ✅ R1 완료 |
-| ~~`ironrdp-tls` rustls feature와 기존 `tokio-rustls` 버전 충돌~~ | ~~R2 빌드 실패~~ | ~~`cargo tree` 의존성 트리 사전 검증~~ | ✅ R2 완료 |
-| ~~비동기 전환 중 기존 프레임 배치/스로틀 로직 깨짐~~ | ~~R1~~ | ~~기존 타이머 로직을 `tokio::time::interval`로 1:1 이식 후 개선~~ | ✅ R1 완료 |
+| ~~`ironrdp-tokio` API가 `ironrdp-blocking`과 크게 다를 수 있음~~ | ~~Phase 1 지연~~ | ~~IronRDP GitHub 예제 코드 참조, 점진적 마이그레이션~~ | ✅ Phase 1 완료 |
+| ~~`ironrdp-tls` rustls feature와 기존 `tokio-rustls` 버전 충돌~~ | ~~Phase 1 빌드 실패~~ | ~~`cargo tree` 의존성 트리 사전 검증~~ | ✅ Phase 1 완료 |
+| ~~비동기 전환 중 기존 프레임 배치/스로를 로직 껜짐~~ | ~~Phase 1~~ | ~~기존 타이머 로직을 `tokio::time::interval`로 1:1 이식 후 개선~~ | ✅ Phase 1 완료 |
 | NSCodec 협상하지만 디코딩 코드 없음 | 잠재적 화면 깨짐 (서버가 NSCodec 전송 시) | 현재 NSCodec 협상을 비활성화하고, IronRDP 공식 지원 시 구현 예정 | 보류(전략 변경) |
-| EGFX GFX 프로세서가 IronRDP에 전용 크레이트 없음 | R9-B-2 전까지 수동 구현 필요 | **R9-B-1**: `ironrdp-dvc` + `ironrdp-pdu` gfx + `ironrdp-graphics::zgfx` 직접 조합으로 Uncompressed 코덱 수동 구현 (즉시 가능). R9-B-2 게시 후 GraphicsPipelineClient로 교체. | R9-B-1 착수 가능 |
-| ClearCodec / Planar 코덱 IronRDP에 디코더 없음 | R9-B 일부 코덱 미지원 | MS-RDPEGFX 스펙 직접 구현. 미지원 코덱은 warn 후 skip | R9-B |
-| OpenH264 빌드 시 C 컴파일러 필요 | CI/크로스컴파일 환경 빌드 실패 | `source` feature 비활성화 후 시스템 OpenH264 링크 옵션 제공 | R9-C |
-| CredSSP 활성화 시 일부 서버와 호환성 문제 | R7 | NLA off 폴백 옵션 유지 | R7 |
-| DVC 채널 핸들링이 IronRDP에서 실험적 | R5-R6-R9 | 채널별 feature gate, 점진적 활성화 | R5+ |
+| EGFX GFX 프로세서가 IronRDP에 전용 크레이트 없음 | Phase 9-B-2 전까지 수동 구현 필요 | **Phase 9-B-1**: `ironrdp-dvc` + `ironrdp-pdu` gfx + `ironrdp-graphics::zgfx` 직접 조합으로 Uncompressed 코덱 수동 구현 (즉시 가능). Phase 9-B-2 게시 후 GraphicsPipelineClient로 교체. | Phase 9-B-1 착수 가능 |
+| ClearCodec / Planar 코덱 IronRDP에 디코더 없음 | Phase 9-B 일부 코덱 미지원 | MS-RDPEGFX 스펙 직접 구현. 미지원 코덱은 warn 후 skip | Phase 9-B |
+| OpenH264 빌드 시 C 컴파일러 필요 | CI/크로스컴파일 환경 빌드 실패 | `source` feature 비활성화 후 시스템 OpenH264 링크 옵션 제공 | Phase 9-C |
+| CredSSP 활성화 시 일부 서버와 호환성 문제 | Phase 7 | NLA off 폴백 옵션 유지 | Phase 7 |
+| DVC 채널 핸들링이 IronRDP에서 실험적 | Phase 5-6-9 | 채널별 feature gate, 점진적 활성화 | Phase 5+ |
 
 ---
 
@@ -793,17 +727,18 @@ pub enum ConnectionEvent {
 
 | Phase | 테스트 | 상태 |
 |-------|--------|------|
-| R1 | Windows Server 2019/2022 + Win10/11 대상 연결/화면/입력 회귀 테스트 | ✅ `cargo run` 성공 확인 |
-| R2 | 자체서명 인증서 + 공인 인증서 서버 모두 테스트 | ✅ ironrdp-tls 적용 완료 |
-| R3 | 한국어 IME 입력, Function 키, 복합 키 조합 | 미완 |
-| R4 | 텍스트 복사/붙여넣기 양방향 확인 | 미완 |
-| R5 | 해상도 변경 후 화면 깨짐 없음 확인 | 미완 |
-| R6 | 로컬 파일 원격 열기/저장 | 미완 |
-| R7 | NLA 활성 서버 접속, 인증서 검증 경고 표시 | 미완 |
-| R8 | 탭 닫기 후 메모리 누수 없음, 네트워크 끊김 후 재접속 | 미완 |
-| R9-A | NSCodec은 IronRDP 공식 지원 시 반영 예정. 현재는 NSCodec 비협상 상태로 안정성 우선 운영 | 보류 |
-| R9-B | EGFX GFX 채널 연결 후 Win10/11 서버에서 RemoteFX Progressive / ClearCodec 화면 정상 표시 | 미완 |
-| R9-C | H.264 AVC420/AVC444로 동영상 재생 시 화면 정상 출력 및 성능 측정 | 미완 |
+| Phase 1 | 비동기 I/O + TLS 전환; 자체서명/공인 인증서 서버; Windows Server 2019/2022 + Win10/11 회귀 테스트 | ✅ 완료 확인 |
+| Phase 3 | 한국어 IME 입력, Function 키, 복합 키 조합 | 미완 |
+| Phase 4 | 텍스트 복사/붙여넣기 양방향 확인 | 미완 |
+| Phase 5 | 해상도 변경 후 화면 깨짐 없음 확인 | 미완 |
+| Phase 6 | 로컬 파일 원격 열기/저장 | 미완 |
+| Phase 7 | NLA 활성 서버 접속, 인증서 검증 경고 표시 | 미완 |
+| Phase 8 | 탭 닫기 후 메모리 누수 없음 (sender 명시적 drop 코드 적용 2026-03-26, **실제 확인 추후**), 네트워크 끊김 후 재접속 | 부분 완료 |
+| Phase 9-A | NSCodec은 IronRDP 공식 지원 시 반영 예정. 현재는 NSCodec 비협상 상태로 안정성 우선 운영 | 보류 |
+| Phase 9-B-1 | EGFX GFX DVC 채널 (Uncompressed) — `GfxProcessor` 구현 완료 2026-03-26, **Win10/11 서버 실제 동작 확인 추후** | 코드 완료, 검증 추후 |
+| Phase 9-B-2 | ironrdp-egfx 기반 교체 + AVC420 — ironrdp-egfx crates.io 미게시 | 보류 |
+| Phase 9-B (기존) | EGFX GFX 채널 연결 후 Win10/11 서버에서 RemoteFX Progressive / ClearCodec 화면 정상 표시 | 추후 확인 |
+| Phase 9-C | H.264 AVC420/AVC444로 동영상 재생 시 화면 정상 출력 및 성능 측정 | 미완 |
 
 - 보안 정책(TLS/NLA/인증서 검증)은 기본 안전 설정을 우선한다.
 - 성능 최적화는 full-frame 동작을 먼저 완성한 다음 dirty-rect로 확장한다.

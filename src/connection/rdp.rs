@@ -31,6 +31,14 @@ use ironrdp_input::{
     synchronize_event, Database, MouseButton as IrdpMouseButton, MousePosition, Operation, Scancode,
     WheelRotations,
 };
+use ironrdp_dvc::{DvcClientProcessor, DvcMessage, DvcProcessor, DrdynvcClient};
+use ironrdp_core::impl_as_any;
+use ironrdp::pdu::rdp::vc::dvc::gfx::{
+    CapabilitiesAdvertisePdu, CapabilitiesV8Flags, CapabilitySet, ClientPdu,
+    Codec1Type, FrameAcknowledgePdu, PixelFormat as GfxPixelFormat, QueueDepth, ServerPdu,
+};
+use ironrdp::pdu::PduResult;
+use ironrdp::graphics::zgfx::Decompressor as ZgfxDecompressor;
 
 use crate::connection::{ConnectionEvent, ConnectionInput, KeyboardIndicators, RdpInput, RdpMouseButton};
 use crate::connection::rdp_input_policy::is_numlock_conflict_scancode;
@@ -123,7 +131,7 @@ async fn run_rdp_worker_inner(
         .map_err(|e| format!("pdu_log write: {}", e))?;
 
     let config = build_config(username, password, None);
-    let (connection_result, mut framed) = connect(config, host.clone(), port).await?;
+    let (connection_result, mut framed) = connect(config, host.clone(), port, tx_from_worker.clone()).await?;
 
     let width = connection_result.desktop_size.width;
     let height = connection_result.desktop_size.height;
@@ -820,6 +828,7 @@ async fn connect(
     config: connector::Config,
     server_name: String,
     port: u16,
+    tx_frames: mpsc::UnboundedSender<ConnectionEvent>,
 ) -> Result<(ConnectionResult, UpgradedFramed), String> {
     let server_addr = tokio::net::lookup_host(format!("{}:{}", server_name, port))
         .await
@@ -836,7 +845,11 @@ async fn connect(
         .map_err(|e| format!("local_addr failed: {}", e))?;
 
     let mut connector = connector::ClientConnector::new(config, client_addr)
-        .with_static_channel(Rdpsnd::new(Box::new(RdpsndBackend::new())));
+        .with_static_channel(Rdpsnd::new(Box::new(RdpsndBackend::new())))
+        .with_static_channel(
+            DrdynvcClient::new()
+                .with_dynamic_channel(GfxProcessor::new(tx_frames))
+        );
 
     // Phase 1: pre-TLS handshake
     let mut framed: ironrdp_tokio::TokioFramed<tokio::net::TcpStream> = Framed::new(tcp_stream);
@@ -930,3 +943,248 @@ fn build_config(username: String, password: String, domain: Option<String>) -> c
         timezone_info: TimezoneInfo::default(),
     }
 }
+
+// ============================================================================
+// EGFX GFX Dynamic Virtual Channel Processor (R9-B-1)
+// Handles the "Microsoft::Windows::RDS::Graphics" DVC using only published
+// crates: ironrdp-dvc + ironrdp-pdu gfx types + ironrdp-graphics::zgfx.
+// Only Codec1Type::Uncompressed is decoded in this phase; all other codecs
+// log a warning and are skipped.
+// ============================================================================
+
+/// Newtype to satisfy the `DvcEncode: Encode + Send` bound for `ClientPdu`.
+struct GfxClientPdu(ClientPdu);
+
+impl ironrdp_dvc::DvcEncode for GfxClientPdu {}
+
+impl ironrdp_core::Encode for GfxClientPdu {
+    fn encode(&self, dst: &mut ironrdp_core::WriteCursor<'_>) -> ironrdp_core::EncodeResult<()> {
+        self.0.encode(dst)
+    }
+    fn name(&self) -> &'static str { "GfxClientPdu" }
+    fn size(&self) -> usize { self.0.size() }
+}
+
+/// Per-surface state (position and dimensions as established by CreateSurface /
+/// MapSurfaceToOutput).
+struct GfxSurface {
+    #[allow(dead_code)]
+    width: u16,
+    #[allow(dead_code)]
+    height: u16,
+    /// Output coordinate origin (screen-space) set by MapSurfaceToOutput.
+    output_origin_x: u32,
+    output_origin_y: u32,
+}
+
+pub(crate) struct GfxProcessor {
+    decompressor: ZgfxDecompressor,
+    surfaces: std::collections::BTreeMap<u16, GfxSurface>,
+    /// Channel to forward decoded frame updates to the Iced UI layer.
+    tx_frames: mpsc::UnboundedSender<ConnectionEvent>,
+    /// Total frames decoded; used in FrameAcknowledge.
+    frames_decoded: u32,
+}
+
+impl_as_any!(GfxProcessor);
+
+impl GfxProcessor {
+    pub fn new(tx_frames: mpsc::UnboundedSender<ConnectionEvent>) -> Self {
+        Self {
+            decompressor: ZgfxDecompressor::new(),
+            surfaces: std::collections::BTreeMap::new(),
+            tx_frames,
+            frames_decoded: 0,
+        }
+    }
+
+    fn capabilities_advertise() -> DvcMessage {
+        let pdu = ClientPdu::CapabilitiesAdvertise(CapabilitiesAdvertisePdu(vec![
+            CapabilitySet::V8 { flags: CapabilitiesV8Flags::empty() },
+        ]));
+        Box::new(GfxClientPdu(pdu))
+    }
+
+    fn frame_acknowledge(frame_id: u32, frames_decoded: u32) -> DvcMessage {
+        let pdu = ClientPdu::FrameAcknowledge(FrameAcknowledgePdu {
+            queue_depth: QueueDepth::Suspend,
+            frame_id,
+            total_frames_decoded: frames_decoded,
+        });
+        Box::new(GfxClientPdu(pdu))
+    }
+
+    /// Decode Uncompressed EGFX pixels to RGBA and emit a FrameUpdate::Rect.
+    /// The surface origin offset (MapSurfaceToOutput) is added to the rect
+    /// coordinates so that the update lands at the correct screen position.
+    fn emit_wire_to_surface_uncompressed(
+        &self,
+        surface_id: u16,
+        pixel_format: GfxPixelFormat,
+        dest: &ironrdp::pdu::geometry::InclusiveRectangle,
+        bitmap_data: &[u8],
+    ) {
+        let surface = match self.surfaces.get(&surface_id) {
+            Some(s) => s,
+            None => {
+                eprintln!("[GFX] WireToSurface1 for unknown surface {}", surface_id);
+                return;
+            }
+        };
+
+        let rect_w = usize::from(dest.width());
+        let rect_h = usize::from(dest.height());
+        if rect_w == 0 || rect_h == 0 {
+            return;
+        }
+
+        let bytes_per_pixel = 4usize;
+        let expected = rect_w * rect_h * bytes_per_pixel;
+        if bitmap_data.len() < expected {
+            eprintln!(
+                "[GFX] WireToSurface1 Uncompressed: expected {} bytes, got {}",
+                expected,
+                bitmap_data.len()
+            );
+            return;
+        }
+
+        // Convert BGRX / BGRA → RGBA (GfxPixelFormat is always 32 bpp, BGR layout).
+        let has_alpha = pixel_format == GfxPixelFormat::ARgb;
+        let mut rgba = Vec::with_capacity(expected);
+        for pixel in bitmap_data[..expected].chunks_exact(4) {
+            rgba.push(pixel[2]); // R
+            rgba.push(pixel[1]); // G
+            rgba.push(pixel[0]); // B
+            rgba.push(if has_alpha { pixel[3] } else { 255 }); // A
+        }
+
+        let x = (surface.output_origin_x as u32).saturating_add(u32::from(dest.left)) as u16;
+        let y = (surface.output_origin_y as u32).saturating_add(u32::from(dest.top)) as u16;
+
+        let update = FrameUpdate::Rect {
+            x,
+            y,
+            width: dest.width(),
+            height: dest.height(),
+            rgba,
+        };
+        let _ = self.tx_frames.send(ConnectionEvent::Frames(vec![update]));
+    }
+}
+
+impl DvcProcessor for GfxProcessor {
+    fn channel_name(&self) -> &str {
+        "Microsoft::Windows::RDS::Graphics"
+    }
+
+    /// Send CapabilitiesAdvertise immediately when the channel is opened.
+    fn start(&mut self, _channel_id: u32) -> PduResult<Vec<DvcMessage>> {
+        eprintln!("[GFX] channel opened, sending CapabilitiesAdvertise V8");
+        Ok(vec![Self::capabilities_advertise()])
+    }
+
+    fn process(&mut self, _channel_id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
+        // ZGFX decompress the DVC payload.
+        let mut decompressed = Vec::new();
+        if let Err(e) = self.decompressor.decompress(payload, &mut decompressed) {
+            // Some servers send uncompressed data here; pass through.
+            eprintln!("[GFX] ZGFX decompress warning (treating as raw): {:?}", e);
+            decompressed = payload.to_vec();
+        }
+
+        let mut responses: Vec<DvcMessage> = Vec::new();
+        let mut cursor = ironrdp_core::ReadCursor::new(&decompressed);
+
+        // One DVC payload may contain multiple concatenated GFX PDUs.
+        while !cursor.is_empty() {
+            let server_pdu: ServerPdu = match ironrdp_core::Decode::decode(&mut cursor) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[GFX] ServerPdu decode error: {:?}", e);
+                    break;
+                }
+            };
+
+            match server_pdu {
+                ServerPdu::CreateSurface(pdu) => {
+                    self.surfaces.insert(pdu.surface_id, GfxSurface {
+                        width: pdu.width,
+                        height: pdu.height,
+                        output_origin_x: 0,
+                        output_origin_y: 0,
+                    });
+                }
+                ServerPdu::DeleteSurface(pdu) => {
+                    self.surfaces.remove(&pdu.surface_id);
+                }
+                ServerPdu::MapSurfaceToOutput(pdu) => {
+                    if let Some(s) = self.surfaces.get_mut(&pdu.surface_id) {
+                        s.output_origin_x = pdu.output_origin_x;
+                        s.output_origin_y = pdu.output_origin_y;
+                    }
+                }
+                ServerPdu::MapSurfaceToScaledOutput(pdu) => {
+                    if let Some(s) = self.surfaces.get_mut(&pdu.surface_id) {
+                        s.output_origin_x = pdu.output_origin_x;
+                        s.output_origin_y = pdu.output_origin_y;
+                    }
+                }
+                ServerPdu::ResetGraphics(pdu) => {
+                    // Clear all surfaces and emit a blank full-frame update.
+                    self.surfaces.clear();
+                    let w = pdu.width as u16;
+                    let h = pdu.height as u16;
+                    let rgba = vec![0u8; usize::from(w) * usize::from(h) * 4];
+                    let update = FrameUpdate::Full { width: w, height: h, rgba };
+                    let _ = self.tx_frames.send(ConnectionEvent::Frames(vec![update]));
+                }
+                ServerPdu::WireToSurface1(pdu) => {
+                    match pdu.codec_id {
+                        Codec1Type::Uncompressed => {
+                            self.emit_wire_to_surface_uncompressed(
+                                pdu.surface_id,
+                                pdu.pixel_format,
+                                &pdu.destination_rectangle,
+                                &pdu.bitmap_data,
+                            );
+                        }
+                        other => {
+                            eprintln!(
+                                "[GFX] WireToSurface1 codec {:?} not yet supported (R9-B-2); skipping",
+                                other
+                            );
+                        }
+                    }
+                }
+                ServerPdu::WireToSurface2(pdu) => {
+                    eprintln!(
+                        "[GFX] WireToSurface2 codec {:?} not yet supported (R9-B-2); skipping",
+                        pdu.codec_id
+                    );
+                }
+                ServerPdu::EndFrame(pdu) => {
+                    self.frames_decoded += 1;
+                    responses.push(Self::frame_acknowledge(pdu.frame_id, self.frames_decoded));
+                }
+                ServerPdu::CapabilitiesConfirm(_) => {
+                    // Server confirmed our capabilities; no action needed.
+                }
+                // Surface cache commands require complex state tracking — skipped for now.
+                ServerPdu::SurfaceToSurface(_)
+                | ServerPdu::SurfaceToCache(_)
+                | ServerPdu::CacheToSurface(_)
+                | ServerPdu::EvictCacheEntry(_)
+                | ServerPdu::SolidFill(_)
+                | ServerPdu::DeleteEncodingContext(_)
+                | ServerPdu::CacheImportReply(_)
+                | ServerPdu::MapSurfaceToScaledWindow(_)
+                | ServerPdu::StartFrame(_) => {}
+            }
+        }
+
+        Ok(responses)
+    }
+}
+
+impl DvcClientProcessor for GfxProcessor {}

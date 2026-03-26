@@ -28,3 +28,4 @@ ironrdp-tls = { version = "0.2.0", features = ["rustls"] }
 bytemuck = { version = "1.25", features = ["derive"] }
 ironrdp-rdpsnd = "0.7.0"
 ironrdp-rdpsnd-native = "0.5.0"
+ironrdp-dvc = "0.5.0"

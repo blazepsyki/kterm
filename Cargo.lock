@@ -3690,6 +3690,7 @@ dependencies = [
  "iced",
  "ironrdp",
  "ironrdp-core",
+ "ironrdp-dvc",
  "ironrdp-input",
  "ironrdp-rdpsnd",
  "ironrdp-rdpsnd-native",
