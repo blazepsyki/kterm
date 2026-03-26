@@ -668,7 +668,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 // ─────────────────────────────────────────────────────────────
 
                 Task::run(
-                    connection::rdp::connect_and_subscribe(host, port, user, pass, cliprdr_factory, clipboard_rx_opt),
+                    connection::rdp::connect_and_subscribe(host, port, user, pass),
                     move |event| Message::ConnectionMessage(target_id, event),
                 )
             } else {
