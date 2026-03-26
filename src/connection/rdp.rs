@@ -1,56 +1,56 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use iced::futures::{self, StreamExt};
-use std::time::{Duration, Instant};
-use std::io::Write as _;
+use std::collections::BTreeMap;
 use std::fs::OpenOptions;
+use std::io::Write as _;
+use std::time::{Duration, Instant};
 
-use ironrdp::connector;
-use ironrdp::connector::{BitmapConfig, ConnectionResult, Credentials};
-use ironrdp::graphics::image_processing::PixelFormat;
-use ironrdp::pdu::geometry::{InclusiveRectangle, Rectangle};
-use ironrdp::pdu::gcc::KeyboardType;
-use ironrdp::pdu::rdp::capability_sets::{
-    MajorPlatformType, BitmapCodecs, Codec, CodecProperty, RemoteFxContainer,
-    RfxClientCapsContainer, RfxCaps, RfxCapset, RfxICap, RfxICapFlags, EntropyBits, CaptureFlags,
-};
-use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
-use ironrdp::pdu::rdp::headers::ShareDataPdu;
-use ironrdp::pdu::bitmap::{BitmapUpdateData, Compression};
-use ironrdp::pdu::Action;
-use ironrdp::connector as rdp_connector;
-use ironrdp::session::image::DecodedImage;
-use ironrdp::session::{ActiveStage, ActiveStageOutput};
-use ironrdp::connector::connection_activation::ConnectionActivationState;
-use ironrdp_core::{ReadCursor, Decode as _, WriteBuf};
-use ironrdp_tokio::{Framed, FramedWrite, MovableTokioStream,
-    connect_begin, connect_finalize, mark_as_upgraded, single_sequence_step};
+use iced::futures::{self, StreamExt};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 
-use ironrdp_rdpsnd::client::Rdpsnd;
-use ironrdp_rdpsnd_native::cpal::RdpsndBackend;
-use ironrdp_dvc::{DrdynvcClient, DvcClientProcessor, DvcEncode, DvcMessage, DvcProcessor};
-use ironrdp_cliprdr::{Cliprdr, CliprdrClient};
-use ironrdp_cliprdr::backend::{ClipboardMessage, CliprdrBackendFactory};
-use ironrdp_core::{impl_as_any, WriteCursor, EncodeResult};
-use ironrdp_core::Encode as IronEncode;
+use ironrdp::connector::{self, BitmapConfig, ConnectionResult, Credentials};
+use ironrdp::connector::connection_activation::ConnectionActivationState;
+use ironrdp::graphics::image_processing::PixelFormat;
 use ironrdp::graphics::zgfx::Decompressor;
-use ironrdp_dvc::ironrdp_pdu as dvc_pdu;
-use ironrdp::pdu::rdp::vc::dvc::gfx::{
-    ClientPdu, ServerPdu, CapabilitiesAdvertisePdu, CapabilitySet,
-    CapabilitiesV8Flags, CapabilitiesV81Flags, CapabilitiesV10Flags,
-    CapabilitiesV103Flags, CapabilitiesV104Flags, CapabilitiesV107Flags,
-    FrameAcknowledgePdu, QueueDepth, Codec1Type, PixelFormat as GfxPixelFormat,
+use ironrdp::pdu::Action;
+use ironrdp::pdu::bitmap::{BitmapUpdateData, Compression};
+use ironrdp::pdu::gcc::KeyboardType;
+use ironrdp::pdu::geometry::{InclusiveRectangle, Rectangle};
+use ironrdp::pdu::rdp::capability_sets::{
+    BitmapCodecs, CaptureFlags, Codec, CodecProperty, EntropyBits, MajorPlatformType,
+    RemoteFxContainer, RfxCaps, RfxCapset, RfxClientCapsContainer, RfxICap, RfxICapFlags,
 };
-use std::collections::BTreeMap;
+use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
+use ironrdp::pdu::rdp::headers::ShareDataPdu;
+use ironrdp::pdu::rdp::vc::dvc::gfx::{
+    CapabilitiesAdvertisePdu, CapabilitiesV10Flags, CapabilitiesV103Flags, CapabilitiesV104Flags,
+    CapabilitiesV107Flags, CapabilitiesV8Flags, CapabilitiesV81Flags, CapabilitySet, ClientPdu,
+    Codec1Type, FrameAcknowledgePdu, PixelFormat as GfxPixelFormat, QueueDepth, ServerPdu,
+};
+use ironrdp::session::image::DecodedImage;
+use ironrdp::session::{ActiveStage, ActiveStageOutput};
+
+use ironrdp_cliprdr::backend::{ClipboardMessage, CliprdrBackendFactory};
+use ironrdp_cliprdr::{Cliprdr, CliprdrClient};
+use ironrdp_core::{
+    impl_as_any, Decode as _, Encode as IronEncode, EncodeResult, ReadCursor, WriteBuf, WriteCursor,
+};
+use ironrdp_dvc::ironrdp_pdu as dvc_pdu;
+use ironrdp_dvc::{DrdynvcClient, DvcClientProcessor, DvcEncode, DvcMessage, DvcProcessor};
 use ironrdp_input::{
     synchronize_event, Database, MouseButton as IrdpMouseButton, MousePosition, Operation, Scancode,
     WheelRotations,
 };
+use ironrdp_rdpsnd::client::Rdpsnd;
+use ironrdp_rdpsnd_native::cpal::RdpsndBackend;
+use ironrdp_tokio::{
+    connect_begin, connect_finalize, mark_as_upgraded, single_sequence_step,
+    Framed, FramedWrite, MovableTokioStream,
+};
 
-use crate::connection::{ConnectionEvent, ConnectionInput, KeyboardIndicators, RdpInput, RdpMouseButton};
 use crate::connection::rdp_input_policy::is_numlock_conflict_scancode;
+use crate::connection::{ConnectionEvent, ConnectionInput, KeyboardIndicators, RdpInput, RdpMouseButton};
 use crate::remote_display::FrameUpdate;
 
 pub fn connect_and_subscribe(
@@ -586,7 +586,7 @@ fn log_x224_pdu(log: &mut std::fs::File, pdu_n: usize, frame: &[u8]) {
         .unwrap_or(0);
 
     // Try to decode as MCS SendDataIndication
-    let Ok(data_ctx) = rdp_connector::legacy::decode_send_data_indication(frame) else {
+    let Ok(data_ctx) = connector::legacy::decode_send_data_indication(frame) else {
         let _ = writeln!(log, "[{ts}] #{pdu_n} X224 <decode-fail: not SendDataIndication> raw={}", hex_head(frame, 32));
         return;
     };
@@ -594,7 +594,7 @@ fn log_x224_pdu(log: &mut std::fs::File, pdu_n: usize, frame: &[u8]) {
     let channel_id = data_ctx.channel_id;
     let initiator_id = data_ctx.initiator_id;
 
-    let Ok(io_pdu) = rdp_connector::legacy::decode_io_channel(data_ctx) else {
+    let Ok(io_pdu) = connector::legacy::decode_io_channel(data_ctx) else {
         // Non-IO channel (SVC data: rdpsnd, drdynvc, cliprdr, …)
         // Try to peek the first byte to hint at the PDU type for DRDYNVC.
         let dvc_hint = if frame.len() > 10 {
@@ -608,10 +608,10 @@ fn log_x224_pdu(log: &mut std::fs::File, pdu_n: usize, frame: &[u8]) {
     };
 
     match io_pdu {
-        rdp_connector::legacy::IoChannelPdu::DeactivateAll(_) => {
+        connector::legacy::IoChannelPdu::DeactivateAll(_) => {
             let _ = writeln!(log, "[{ts}] #{pdu_n} X224 ch={channel_id} ***DeactivateAll***");
         }
-        rdp_connector::legacy::IoChannelPdu::Data(ctx) => {
+        connector::legacy::IoChannelPdu::Data(ctx) => {
             let name = ctx.pdu.as_short_name();
             let detail = match &ctx.pdu {
                 ShareDataPdu::SetKeyboardIndicators(raw) => {
