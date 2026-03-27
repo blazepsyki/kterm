@@ -8,6 +8,7 @@
 | 항목 | 비고 |
 |------|------|
 | TCP + TLS 1.2/1.3 업그레이드 | `ironrdp-tls` 크레이트 기반 (`NoCertificateVerification` 내장, 인증서 검증은 Phase 7) |
+| NLA (CredSSP) | `enable_credssp: true` 적용 완료 — NTLM 기반 인증 동작, TLS 폴백 유지 |
 | 사용자명/비밀번호 인증 | `Credentials::UsernamePassword` |
 | 서버 인증서 공개키 추출 | CredSSP 채널 바인딩용 |
 | 고정 초기 데스크톱 크기 협상 | 1280×720 하드코딩 |
@@ -43,10 +44,12 @@
 | 마우스 수직 휠 | `PointerFlags::VERTICAL_WHEEL` |
 | 마우스 수평 휠 | `PointerFlags::HORIZONTAL_WHEEL` |
 
-#### 가상 채널
+#### 채널 & 리다이렉션
 | 항목 | 비고 |
 |------|------|
 | rdpsnd 정적 채널 등록 | `ironrdp-rdpsnd` + `cpal` 백엔드, **재생 테스트 미완료** |
+| 클립보드 공유 (RDPCLIP) | **Phase 4-1 완료**: `ironrdp-cliprdr` + `ironrdp-cliprdr-native` 기반 Windows 경로 구현 및 텍스트 복사/붙여넣기 확인. **Phase 4-2 필요**: Linux/macOS 백엔드 설계/구현 |
+
 
 #### I/O
 | 항목 | 비고 |
@@ -61,7 +64,6 @@
 #### 연결 / 인증
 | 항목 | 비고 |
 |------|------|
-| NLA (CredSSP) | `enable_credssp: true` 적용 완료 — NTLM 기반 인증 동작, TLS 폴백 유지 |
 | TLS 서버 인증서 검증 | `NoCertificateVerification` — 보안 취약 |
 | 도메인 인증 | `domain: None` 고정 |
 | 자동 로그온 | `autologon: false` 고정 |
@@ -86,7 +88,6 @@
 #### 입력
 | 항목 | 비고 |
 |------|------|
-| 마우스 수평 휠 | `PointerFlags::HORIZONTAL_WHEEL` 구현 완료 |
 | IME 조합 입력 | commit 문자열 전송만 지원, 조합 상태/후보창/세밀한 locale 정책은 미처리 |
 | 복합 키 조합 정밀 매핑 | `Ctrl+Alt+End -> Ctrl+Alt+Del`만 지원, 나머지 복합 조합 정책은 미완 |
 | 서버 lock-state 전환의 프로토콜 기반 감지 | 테스트한 XRDP(LXQt)는 로그인 → 데스크톱 전환 시 `DeactivateAll`/`SetKeyboardIndicators`를 보내지 않아 불가 |
@@ -96,7 +97,6 @@
 #### 채널 / 리다이렉션
 | 항목 | 비고 |
 |------|------|
-| 클립보드 공유 (RDPCLIP) | **Phase 4-1 완료**: `ironrdp-cliprdr` + `ironrdp-cliprdr-native` 기반 Windows 경로 구현 및 텍스트 복사/붙여넣기 확인. **Phase 4-2 필요**: Linux/macOS 백엔드 설계/구현 |
 | 드라이브 리다이렉션 (RDPDR) | 미구현 |
 | 프린터 리다이렉션 | 미구현 |
 | 포트/COM 리다이렉션 | 미구현 |
@@ -204,13 +204,8 @@
 | `ironrdp-rdpsnd` | 0.7.0 | 오디오 정적 채널 |
 | `ironrdp-rdpsnd-native` | 0.5.0 | cpal 오디오 백엔드 |
 
-> **제거됨 (Phase 1)**: `ironrdp-blocking`, `tokio-rustls`, `x509-cert`, `sspi` — Cargo.toml 직접 선언 제거 완료  
-> `tokio-rustls`/`x509-cert`는 `sspi→reqwest→hyper-rustls` / `ironrdp-pdu` 경로로 간접 의존 잔류(바이너리에 포함)
-
 | **추가 예정** | 버전 | 역할 |
 |--------------|------|------|
-| ~~`ironrdp-tokio`~~ | ~~0.8.0~~ | ~~**Tokio 비동기 I/O**~~ — ✅ **Phase 1 완료** |
-| ~~`ironrdp-tls`~~ | ~~0.2.0~~ | ~~**TLS 보일러플레이트**~~ — ✅ **Phase 1 완료** |
 | `ironrdp-cliprdr` | 0.5.0 | **클립보드 공유** (RDPECLIP 정적 채널) |
 | `ironrdp-cliprdr-native` | 0.5.0 | **클립보드 네이티브 백엔드** (OS 클립보드 연동) |
 | `ironrdp-dvc` | 0.5.0 | **동적 가상 채널** (DRDYNVC) — Phase 9-B-1에서 수동 GFX 프로세서 구현 시 **직접 추가 필요** (`DvcClientProcessor` 트레이트); Phase 5 DVC 인프라와 공유 |
@@ -219,7 +214,6 @@
 | `ironrdp-rdpdr` | 0.5.0 | **드라이브 리다이렉션** (RDPDR 채널) |
 | `ironrdp-rdpdr-native` | 0.5.0 | **드라이브 리다이렉션 네이티브 백엔드** |
 | `ironrdp-egfx` | 0.1.0 (**crates.io 미게시 — 보류**) | EGFX 전체 파이프라인 — `GraphicsPipelineClient` DVC 프로세서 + ZGFX + AVC420 (openh264 feature) — **crates.io 재게시 후 통합** |
-| `openh264` | — | ~~직접 추가~~ — `ironrdp-egfx` 내부 의존성으로 포함 (`openh264-bundled`/`openh264-libloading` feature 선택) |
 
 | **직접 의존성 제거 완료** | 이유 | 비고 |
 |--------------------------|------|------|
@@ -227,8 +221,6 @@
 | ~~`x509-cert`~~ (직접 선언) | `ironrdp-tls`가 내부 처리 — ✅ **Phase 1 완료** | `ironrdp-pdu` 간접 의존으로 바이너리 잡류 |
 | ~~`tokio-rustls`~~ (직접 선언) | `ironrdp-tls`가 래핑 — ✅ **Phase 1 완료** | `sspi → reqwest → hyper-rustls` 간접 의존으로 바이너리 잡류 |
 | ~~`sspi`~~ (직접 선언) | `ironrdp-tokio::reqwest::ReqwestNetworkClient`로 교체 — ✅ **Phase 1 완료** | 간접 의존으로 바이너리 잡류 |
-
-> **⚠️ 의존성 분석 결과**: `cargo tree -i` 확인 결과, `tokio-rustls`는 `sspi → reqwest → hyper-rustls` 체인으로, `x509-cert`는 `ironrdp-pdu`를 통해 이미 간접 의존되고 있음. 따라서 `Cargo.toml`에서 직접 선언만 제거할 수 있으며, 두 크레이트는 컴파일된 바이너리에 계속 포함됨. **실질적 효과는 `kterm` 직접 코드에서 해당 크레이트 API 사용 제거 (코드 단순화)에 있음.**
 
 ---
 
@@ -329,11 +321,11 @@
 
 > `ironrdp-cliprdr` 기반 공통 CLIPRDR 계층 + 플랫폼별 OS 클립보드 백엔드
 
-### Phase 4-1: Windows 네이티브 백엔드
+### Phase 4-1: Windows 네이티브 백엔드 - ✅ **완료**
 
 > `ironrdp-cliprdr` + `ironrdp-cliprdr-native` 통합
 
-**상태**: ✅ **완료** (2026-03-27) — Windows 백엔드 초기화, RDP 워커 연결 배선, 텍스트 복사/붙여넣기 양방향 동작 확인
+**상태**: (2026-03-27) — Windows 백엔드 초기화, RDP 워커 연결 배선, 텍스트 복사/붙여넣기 양방향 동작 확인
 
 #### 변경 내용
 1. **`Cargo.toml`**: `ironrdp-cliprdr = "0.5.0"`, `ironrdp-cliprdr-native = "0.5.0"` 추가
