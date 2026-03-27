@@ -86,7 +86,7 @@ pub fn connect_and_subscribe(
                                 (Some((reader, writer)), port_name, baud_rate, tx_to_serial, rx_from_iced),
                             ))
                         }
-                        Some(ConnectionInput::RdpInput(_)) => {
+                        Some(ConnectionInput::RemoteInput(_)) => {
                             Some((
                                 ConnectionEvent::Data(vec![]),
                                 (Some((reader, writer)), port_name, baud_rate, tx_to_serial, rx_from_iced),

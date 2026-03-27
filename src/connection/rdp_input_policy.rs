@@ -2,12 +2,12 @@
 
 use iced::keyboard;
 
-use crate::connection::{KeyboardIndicators, RdpInput};
+use crate::connection::{KeyboardIndicators, RemoteInput};
 
 pub enum RoutedKeyEvent {
     Ignore,
     SyncIndicators,
-    Input(RdpInput),
+    Input(RemoteInput),
 }
 
 pub fn route_key_pressed(
@@ -20,7 +20,7 @@ pub fn route_key_pressed(
     }
 
     if let Some((code, extended)) = map_key_to_rdp_scancode(physical_key) {
-        return RoutedKeyEvent::Input(RdpInput::KeyboardScancode {
+        return RoutedKeyEvent::Input(RemoteInput::KeyboardScancode {
             code,
             extended,
             down: true,
@@ -30,7 +30,7 @@ pub fn route_key_pressed(
     if let Some(ch) = text.and_then(|value| value.chars().next()) {
         let codepoint = ch as u32;
         if codepoint <= 0xFFFF {
-            return RoutedKeyEvent::Input(RdpInput::KeyboardUnicode {
+            return RoutedKeyEvent::Input(RemoteInput::KeyboardUnicode {
                 codepoint: codepoint as u16,
                 down: true,
             });
@@ -49,7 +49,7 @@ pub fn route_key_released(
     }
 
     if let Some((code, extended)) = map_key_to_rdp_scancode(physical_key) {
-        return RoutedKeyEvent::Input(RdpInput::KeyboardScancode {
+        return RoutedKeyEvent::Input(RemoteInput::KeyboardScancode {
             code,
             extended,
             down: false,
@@ -60,7 +60,7 @@ pub fn route_key_released(
         if let Some(ch) = value.chars().next() {
             let codepoint = ch as u32;
             if codepoint <= 0xFFFF {
-                return RoutedKeyEvent::Input(RdpInput::KeyboardUnicode {
+                return RoutedKeyEvent::Input(RemoteInput::KeyboardUnicode {
                     codepoint: codepoint as u16,
                     down: false,
                 });
@@ -106,15 +106,15 @@ pub fn is_remote_secure_attention_key(physical_key: &keyboard::key::Physical) ->
     matches!(physical_key, keyboard::key::Physical::Code(keyboard::key::Code::End))
 }
 
-pub fn remote_secure_attention_inputs(down: bool) -> Vec<RdpInput> {
-    vec![RdpInput::KeyboardScancode {
+pub fn remote_secure_attention_inputs(down: bool) -> Vec<RemoteInput> {
+    vec![RemoteInput::KeyboardScancode {
         code: 0x53,
         extended: true,
         down,
     }]
 }
 
-pub fn unicode_inputs_for_text(text: &str) -> Vec<RdpInput> {
+pub fn unicode_inputs_for_text(text: &str) -> Vec<RemoteInput> {
     let mut inputs = Vec::new();
 
     for ch in text.chars() {
@@ -124,11 +124,11 @@ pub fn unicode_inputs_for_text(text: &str) -> Vec<RdpInput> {
         }
 
         let codepoint = codepoint as u16;
-        inputs.push(RdpInput::KeyboardUnicode {
+        inputs.push(RemoteInput::KeyboardUnicode {
             codepoint,
             down: true,
         });
-        inputs.push(RdpInput::KeyboardUnicode {
+        inputs.push(RemoteInput::KeyboardUnicode {
             codepoint,
             down: false,
         });

@@ -103,7 +103,7 @@ pub fn spawn_local_shell(program: String, args: Vec<String>) -> iced::futures::s
                             let next_state = (Some(current), program, args, ssh_tx, iced_tx, ssh_rx, iced_rx);
                             Some((ConnectionEvent::Data(vec![]), next_state))
                         }
-                        Some(ConnectionInput::RdpInput(_)) => {
+                        Some(ConnectionInput::RemoteInput(_)) => {
                             let next_state = (Some(current), program, args, ssh_tx, iced_tx, ssh_rx, iced_rx);
                             Some((ConnectionEvent::Data(vec![]), next_state))
                         }

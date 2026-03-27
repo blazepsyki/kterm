@@ -11,7 +11,7 @@ use crate::remote_display::FrameUpdate;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
-pub enum RdpInput {
+pub enum RemoteInput {
     KeyboardScancode {
         code: u8,
         extended: bool,
@@ -26,7 +26,7 @@ pub enum RdpInput {
         y: u16,
     },
     MouseButton {
-        button: RdpMouseButton,
+        button: RemoteMouseButton,
         down: bool,
     },
     MouseWheel {
@@ -38,7 +38,7 @@ pub enum RdpInput {
 }
 
 #[derive(Debug, Clone)]
-pub enum RdpMouseButton {
+pub enum RemoteMouseButton {
     Left,
     Right,
     Middle,
@@ -65,7 +65,7 @@ pub enum ConnectionInput {
     Resize { cols: u16, rows: u16 },
     SyncKeyboardIndicators(KeyboardIndicators),
     ReleaseAllModifiers,
-    RdpInput(RdpInput),
+    RemoteInput(RemoteInput),
 }
 
 impl std::fmt::Debug for ConnectionEvent {

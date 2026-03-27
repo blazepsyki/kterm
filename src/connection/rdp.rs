@@ -50,7 +50,7 @@ use ironrdp_tokio::{
 };
 
 use crate::connection::rdp_input_policy::is_numlock_conflict_scancode;
-use crate::connection::{ConnectionEvent, ConnectionInput, KeyboardIndicators, RdpInput, RdpMouseButton};
+use crate::connection::{ConnectionEvent, ConnectionInput, KeyboardIndicators, RemoteInput, RemoteMouseButton};
 use crate::remote_display::FrameUpdate;
 
 pub fn connect_and_subscribe(
@@ -428,7 +428,7 @@ async fn sync_keyboard_indicators(
 fn should_presync_keyboard_input(input: &ConnectionInput) -> bool {
     matches!(
         input,
-        ConnectionInput::RdpInput(RdpInput::KeyboardScancode {
+        ConnectionInput::RemoteInput(RemoteInput::KeyboardScancode {
             code,
             down: true,
             ..
@@ -537,32 +537,32 @@ async fn handle_rdp_input(
             }
         }
         ConnectionInput::Data(_) => {}
-        ConnectionInput::RdpInput(rdp_input) => {
-            let op_opt: Option<Operation> = match rdp_input {
-                RdpInput::KeyboardScancode { code, extended, down } => {
+        ConnectionInput::RemoteInput(remote_input) => {
+            let op_opt: Option<Operation> = match remote_input {
+                RemoteInput::KeyboardScancode { code, extended, down } => {
                     let sc = Scancode::from_u8(extended, code);
                     Some(if down { Operation::KeyPressed(sc) } else { Operation::KeyReleased(sc) })
                 }
-                RdpInput::KeyboardUnicode { codepoint, down } => {
+                RemoteInput::KeyboardUnicode { codepoint, down } => {
                     char::from_u32(u32::from(codepoint)).map(|ch| {
                         if down { Operation::UnicodeKeyPressed(ch) } else { Operation::UnicodeKeyReleased(ch) }
                     })
                 }
-                RdpInput::MouseMove { x, y } => {
+                RemoteInput::MouseMove { x, y } => {
                     Some(Operation::MouseMove(MousePosition { x, y }))
                 }
-                RdpInput::MouseButton { button, down } => {
+                RemoteInput::MouseButton { button, down } => {
                     let mb = match button {
-                        RdpMouseButton::Left   => IrdpMouseButton::Left,
-                        RdpMouseButton::Right  => IrdpMouseButton::Right,
-                        RdpMouseButton::Middle => IrdpMouseButton::Middle,
+                        RemoteMouseButton::Left   => IrdpMouseButton::Left,
+                        RemoteMouseButton::Right  => IrdpMouseButton::Right,
+                        RemoteMouseButton::Middle => IrdpMouseButton::Middle,
                     };
                     Some(if down { Operation::MouseButtonPressed(mb) } else { Operation::MouseButtonReleased(mb) })
                 }
-                RdpInput::MouseWheel { delta } => {
+                RemoteInput::MouseWheel { delta } => {
                     Some(Operation::WheelRotations(WheelRotations { is_vertical: true, rotation_units: delta }))
                 }
-                RdpInput::MouseHorizontalWheel { delta } => {
+                RemoteInput::MouseHorizontalWheel { delta } => {
                     Some(Operation::WheelRotations(WheelRotations { is_vertical: false, rotation_units: delta }))
                 }
             };

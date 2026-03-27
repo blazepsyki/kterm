@@ -371,8 +371,8 @@ pub enum Message {
     PasteData(Option<String>),
     ClearSelection,
     TryHandleKey(keyboard::Key, keyboard::Modifiers),
-    RemoteRdpInput(connection::RdpInput),
-    RemoteRdpInputs(Vec<connection::RdpInput>),
+    RemoteDisplayInput(connection::RemoteInput),
+    RemoteDisplayInputs(Vec<connection::RemoteInput>),
     RemoteSecureAttention(bool),
     SyncRdpKeyboardIndicators,
     ReleaseRdpModifiers,
@@ -427,7 +427,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 if matches!(session.kind, SessionKind::RemoteDisplay) {
                     if let Some(ref sender) = session.sender {
                         for input in unicode_inputs_for_text(&text_str) {
-                            let _ = sender.send(connection::ConnectionInput::RdpInput(input));
+                            let _ = sender.send(connection::ConnectionInput::RemoteInput(input));
                         }
                     }
                 } else {
@@ -757,21 +757,21 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::RemoteRdpInput(input) => {
+        Message::RemoteDisplayInput(input) => {
             if let Some(session) = state.sessions.get_mut(state.active_index) {
                 if let Some(ref sender) = session.sender {
-                    let input = transform_rdp_mouse(input, state.window_size, session.remote_display.as_ref());
-                    let _ = sender.send(connection::ConnectionInput::RdpInput(input));
+                    let input = transform_remote_mouse(input, state.window_size, session.remote_display.as_ref());
+                    let _ = sender.send(connection::ConnectionInput::RemoteInput(input));
                 }
             }
             Task::none()
         }
-        Message::RemoteRdpInputs(inputs) => {
+        Message::RemoteDisplayInputs(inputs) => {
             if let Some(session) = state.sessions.get_mut(state.active_index) {
                 if let Some(ref sender) = session.sender {
                     for input in inputs {
-                        let input = transform_rdp_mouse(input, state.window_size, session.remote_display.as_ref());
-                        let _ = sender.send(connection::ConnectionInput::RdpInput(input));
+                        let input = transform_remote_mouse(input, state.window_size, session.remote_display.as_ref());
+                        let _ = sender.send(connection::ConnectionInput::RemoteInput(input));
                     }
                 }
             }
@@ -782,7 +782,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 session.rdp_secure_attention_active = active;
                 if let Some(ref sender) = session.sender {
                     for input in remote_secure_attention_inputs(active) {
-                        let _ = sender.send(connection::ConnectionInput::RdpInput(input));
+                        let _ = sender.send(connection::ConnectionInput::RemoteInput(input));
                     }
                 }
             }
@@ -985,7 +985,7 @@ fn subscription(state: &State) -> Subscription<Message> {
                         RoutedKeyEvent::SyncIndicators => {
                             Some(Message::SyncRdpKeyboardIndicators)
                         }
-                        RoutedKeyEvent::Input(input) => Some(Message::RemoteRdpInput(input)),
+                        RoutedKeyEvent::Input(input) => Some(Message::RemoteDisplayInput(input)),
                     }
                 }
                 iced::Event::Keyboard(keyboard::Event::KeyReleased { key, physical_key, modifiers, .. })
@@ -1002,11 +1002,11 @@ fn subscription(state: &State) -> Subscription<Message> {
                         RoutedKeyEvent::SyncIndicators => {
                             Some(Message::SyncRdpKeyboardIndicators)
                         }
-                        RoutedKeyEvent::Input(input) => Some(Message::RemoteRdpInput(input)),
+                        RoutedKeyEvent::Input(input) => Some(Message::RemoteDisplayInput(input)),
                     }
                 }
                 iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                    Some(Message::RemoteRdpInput(connection::RdpInput::MouseMove {
+                    Some(Message::RemoteDisplayInput(connection::RemoteInput::MouseMove {
                         x: position.x.max(0.0).min(u16::MAX as f32) as u16,
                         y: position.y.max(0.0).min(u16::MAX as f32) as u16,
                     }))
@@ -1015,9 +1015,9 @@ fn subscription(state: &State) -> Subscription<Message> {
                     if status == event::Status::Ignored =>
                 {
                     match button {
-                        mouse::Button::Left => Some(Message::RemoteRdpInput(connection::RdpInput::MouseButton { button: connection::RdpMouseButton::Left, down: true })),
-                        mouse::Button::Right => Some(Message::RemoteRdpInput(connection::RdpInput::MouseButton { button: connection::RdpMouseButton::Right, down: true })),
-                        mouse::Button::Middle => Some(Message::RemoteRdpInput(connection::RdpInput::MouseButton { button: connection::RdpMouseButton::Middle, down: true })),
+                        mouse::Button::Left => Some(Message::RemoteDisplayInput(connection::RemoteInput::MouseButton { button: connection::RemoteMouseButton::Left, down: true })),
+                        mouse::Button::Right => Some(Message::RemoteDisplayInput(connection::RemoteInput::MouseButton { button: connection::RemoteMouseButton::Right, down: true })),
+                        mouse::Button::Middle => Some(Message::RemoteDisplayInput(connection::RemoteInput::MouseButton { button: connection::RemoteMouseButton::Middle, down: true })),
                         _ => None,
                     }
                 }
@@ -1025,9 +1025,9 @@ fn subscription(state: &State) -> Subscription<Message> {
                     if status == event::Status::Ignored =>
                 {
                     match button {
-                        mouse::Button::Left => Some(Message::RemoteRdpInput(connection::RdpInput::MouseButton { button: connection::RdpMouseButton::Left, down: false })),
-                        mouse::Button::Right => Some(Message::RemoteRdpInput(connection::RdpInput::MouseButton { button: connection::RdpMouseButton::Right, down: false })),
-                        mouse::Button::Middle => Some(Message::RemoteRdpInput(connection::RdpInput::MouseButton { button: connection::RdpMouseButton::Middle, down: false })),
+                        mouse::Button::Left => Some(Message::RemoteDisplayInput(connection::RemoteInput::MouseButton { button: connection::RemoteMouseButton::Left, down: false })),
+                        mouse::Button::Right => Some(Message::RemoteDisplayInput(connection::RemoteInput::MouseButton { button: connection::RemoteMouseButton::Right, down: false })),
+                        mouse::Button::Middle => Some(Message::RemoteDisplayInput(connection::RemoteInput::MouseButton { button: connection::RemoteMouseButton::Middle, down: false })),
                         _ => None,
                     }
                 }
@@ -1041,11 +1041,11 @@ fn subscription(state: &State) -> Subscription<Message> {
                     let vy_step = (vy * 120.0).round();
                     let hx_step = (hx * 120.0).round();
                     if vy_step != 0.0 {
-                        Some(Message::RemoteRdpInput(connection::RdpInput::MouseWheel {
+                        Some(Message::RemoteDisplayInput(connection::RemoteInput::MouseWheel {
                             delta: vy_step.max(i16::MIN as f32).min(i16::MAX as f32) as i16,
                         }))
                     } else if hx_step != 0.0 {
-                        Some(Message::RemoteRdpInput(connection::RdpInput::MouseHorizontalWheel {
+                        Some(Message::RemoteDisplayInput(connection::RemoteInput::MouseHorizontalWheel {
                             delta: hx_step.max(i16::MIN as f32).min(i16::MAX as f32) as i16,
                         }))
                     } else {
@@ -1062,13 +1062,13 @@ fn subscription(state: &State) -> Subscription<Message> {
     }
 }
 
-fn transform_rdp_mouse(
-    input: connection::RdpInput,
+fn transform_remote_mouse(
+    input: connection::RemoteInput,
     window_size: (f32, f32),
     display: Option<&RemoteDisplayState>,
-) -> connection::RdpInput {
+) -> connection::RemoteInput {
     match input {
-        connection::RdpInput::MouseMove { x, y } => {
+        connection::RemoteInput::MouseMove { x, y } => {
             const CONTENT_X: f32 = 181.0; // sidebar(180) + vr(1)
             const CONTENT_Y: f32 = 66.0;  // title_bar(35) + tab_bar(30) + hr(1)
 
@@ -1096,11 +1096,11 @@ fn transform_rdp_mouse(
                 let offset_x = (content_w - rendered_w) * 0.5;
                 let offset_y = (content_h - rendered_h) * 0.5;
 
-                let rdp_x = ((rel_x - offset_x) / rendered_w * desk_w).clamp(0.0, desk_w - 1.0) as u16;
-                let rdp_y = ((rel_y - offset_y) / rendered_h * desk_h).clamp(0.0, desk_h - 1.0) as u16;
-                connection::RdpInput::MouseMove { x: rdp_x, y: rdp_y }
+                let remote_x = ((rel_x - offset_x) / rendered_w * desk_w).clamp(0.0, desk_w - 1.0) as u16;
+                let remote_y = ((rel_y - offset_y) / rendered_h * desk_h).clamp(0.0, desk_h - 1.0) as u16;
+                connection::RemoteInput::MouseMove { x: remote_x, y: remote_y }
             } else {
-                connection::RdpInput::MouseMove { x: rel_x as u16, y: rel_y as u16 }
+                connection::RemoteInput::MouseMove { x: rel_x as u16, y: rel_y as u16 }
             }
         }
         other => other,

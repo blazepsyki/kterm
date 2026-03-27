@@ -136,7 +136,7 @@ pub fn connect_and_subscribe(
                                     Some((ConnectionEvent::Data(vec![]), SshState::Connected { session, channel, ssh_to_iced_rx, iced_to_ssh_rx }))
                                 }
                             }
-                            Some(ConnectionInput::RdpInput(_)) => {
+                            Some(ConnectionInput::RemoteInput(_)) => {
                                 Some((ConnectionEvent::Data(vec![]), SshState::Connected { session, channel, ssh_to_iced_rx, iced_to_ssh_rx }))
                             }
                             Some(ConnectionInput::SyncKeyboardIndicators(_)) => {
