@@ -148,6 +148,7 @@ async fn run_vnc_worker_inner(
 
     let mut pointer = PointerState::default();
     let mut remote_lock_state: Option<KeyboardIndicators> = None;
+    let mut key_state = VncKeyState::default();
     let mut refresh = tokio::time::interval(VNC_REFRESH_INTERVAL);
     refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -156,7 +157,14 @@ async fn run_vnc_worker_inner(
             input = rx_from_iced.recv() => {
                 match input {
                     Some(input) => {
-                        handle_connection_input(&vnc, &mut pointer, &mut remote_lock_state, input).await?
+                        handle_connection_input(
+                            &vnc,
+                            &mut pointer,
+                            &mut remote_lock_state,
+                            &mut key_state,
+                            input,
+                        )
+                        .await?
                     }
                     None => {
                         info!("[VNC] input channel closed; closing session");
@@ -198,6 +206,32 @@ struct PointerState {
     x: u16,
     y: u16,
     buttons: u8,
+}
+
+#[derive(Debug, Default)]
+struct VncKeyState {
+    shift_left: bool,
+    shift_right: bool,
+    caps_lock: bool,
+    num_lock: bool,
+    scroll_lock: bool,
+}
+
+impl VncKeyState {
+    fn shift_active(&self) -> bool {
+        self.shift_left || self.shift_right
+    }
+
+    fn update_from_scancode(&mut self, code: u8, extended: bool, down: bool) {
+        match (code, extended) {
+            (0x2A, false) => self.shift_left = down,
+            (0x36, false) => self.shift_right = down,
+            (0x3A, _) if down => self.caps_lock = !self.caps_lock,
+            (0x45, _) if down => self.num_lock = !self.num_lock,
+            (0x46, _) if down => self.scroll_lock = !self.scroll_lock,
+            _ => {}
+        }
+    }
 }
 
 async fn handle_vnc_event(
@@ -289,10 +323,13 @@ async fn handle_connection_input(
     vnc: &VncClient,
     pointer: &mut PointerState,
     remote_lock_state: &mut Option<KeyboardIndicators>,
+    key_state: &mut VncKeyState,
     input: ConnectionInput,
 ) -> Result<(), String> {
     match input {
-        ConnectionInput::RemoteInput(remote) => handle_remote_input(vnc, pointer, remote).await,
+        ConnectionInput::RemoteInput(remote) => {
+            handle_remote_input(vnc, pointer, key_state, remote).await
+        }
         ConnectionInput::Data(bytes) => {
             // Paste path: send UTF-8 text as keysyms.
             let text = String::from_utf8_lossy(&bytes);
@@ -313,6 +350,13 @@ async fn handle_connection_input(
                 .map_err(|e| format!("VNC full refresh on resize failed: {}", e))
         }
         ConnectionInput::SyncKeyboardIndicators(indicators) => {
+            info!(
+                "[VNC][LOCK] sync request local num={} caps={} scroll={}",
+                indicators.num_lock, indicators.caps_lock, indicators.scroll_lock
+            );
+            key_state.num_lock = indicators.num_lock;
+            key_state.caps_lock = indicators.caps_lock;
+            key_state.scroll_lock = indicators.scroll_lock;
             sync_keyboard_indicators(vnc, remote_lock_state, indicators).await
         }
         ConnectionInput::ReleaseAllModifiers => {
@@ -327,6 +371,7 @@ async fn handle_connection_input(
 async fn handle_remote_input(
     vnc: &VncClient,
     pointer: &mut PointerState,
+    key_state: &mut VncKeyState,
     remote: RemoteInput,
 ) -> Result<(), String> {
     match remote {
@@ -335,7 +380,27 @@ async fn handle_remote_input(
             extended,
             down,
         } => {
-            if let Some(keysym) = keysym_from_scancode(code, extended) {
+            key_state.update_from_scancode(code, extended, down);
+
+            if is_lock_scancode(code) {
+                info!(
+                    "[VNC][LOCK] scancode input code=0x{:02X} extended={} down={}",
+                    code, extended, down
+                );
+            } else if is_modifier_scancode(code, extended) {
+                debug!(
+                    "[VNC][MOD] scancode input code=0x{:02X} extended={} down={}",
+                    code, extended, down
+                );
+            }
+
+            if let Some(keysym) = keysym_from_scancode_with_state(code, extended, key_state) {
+                if is_lock_scancode(code) {
+                    info!(
+                        "[VNC][LOCK] mapped scancode code=0x{:02X} extended={} -> keysym=0x{:X}",
+                        code, extended, keysym
+                    );
+                }
                 send_key(vnc, keysym, down).await?;
             } else {
                 debug!("[VNC] unmapped scancode code={} extended={}", code, extended);
@@ -405,60 +470,49 @@ async fn send_pointer(vnc: &VncClient, x: u16, y: u16, buttons: u8) -> Result<()
     .map_err(|e| format!("VNC pointer input failed: {}", e))
 }
 
-fn keysym_from_scancode(code: u8, extended: bool) -> Option<u32> {
+fn keysym_from_scancode_with_state(
+    code: u8,
+    extended: bool,
+    key_state: &VncKeyState,
+) -> Option<u32> {
+    if !extended {
+        if let Some(letter) = alpha_from_scancode(code) {
+            let upper = key_state.caps_lock ^ key_state.shift_active();
+            return Some(if upper {
+                letter.to_ascii_uppercase() as u32
+            } else {
+                letter as u32
+            });
+        }
+
+        if let Some((normal, shifted)) = printable_symbol_from_scancode(code) {
+            return Some(if key_state.shift_active() {
+                shifted as u32
+            } else {
+                normal as u32
+            });
+        }
+
+        if let Some(keysym) = numpad_keysym_from_scancode(code, key_state.num_lock) {
+            return Some(keysym);
+        }
+    }
+
     let keysym = match (code, extended) {
         (0x01, _) => 0xff1b, // Escape
-        (0x02, _) => '1' as u32,
-        (0x03, _) => '2' as u32,
-        (0x04, _) => '3' as u32,
-        (0x05, _) => '4' as u32,
-        (0x06, _) => '5' as u32,
-        (0x07, _) => '6' as u32,
-        (0x08, _) => '7' as u32,
-        (0x09, _) => '8' as u32,
-        (0x0a, _) => '9' as u32,
-        (0x0b, _) => '0' as u32,
-        (0x0c, _) => '-' as u32,
-        (0x0d, _) => '=' as u32,
         (0x0e, _) => 0xff08, // BackSpace
         (0x0f, _) => 0xff09, // Tab
-        (0x10, _) => 'q' as u32,
-        (0x11, _) => 'w' as u32,
-        (0x12, _) => 'e' as u32,
-        (0x13, _) => 'r' as u32,
-        (0x14, _) => 't' as u32,
-        (0x15, _) => 'y' as u32,
-        (0x16, _) => 'u' as u32,
-        (0x17, _) => 'i' as u32,
-        (0x18, _) => 'o' as u32,
-        (0x19, _) => 'p' as u32,
         (0x1a, _) => '[' as u32,
         (0x1b, _) => ']' as u32,
         (0x1c, false) => 0xff0d, // Return
         (0x1c, true) => 0xff8d,  // KP_Enter
         (0x1d, false) => 0xffe3, // Control_L
         (0x1d, true) => 0xffe4,  // Control_R
-        (0x1e, _) => 'a' as u32,
-        (0x1f, _) => 's' as u32,
-        (0x20, _) => 'd' as u32,
-        (0x21, _) => 'f' as u32,
-        (0x22, _) => 'g' as u32,
-        (0x23, _) => 'h' as u32,
-        (0x24, _) => 'j' as u32,
-        (0x25, _) => 'k' as u32,
-        (0x26, _) => 'l' as u32,
         (0x27, _) => ';' as u32,
         (0x28, _) => '\'' as u32,
         (0x29, _) => '`' as u32,
         (0x2a, _) => 0xffe1, // Shift_L
         (0x2b, _) => '\\' as u32,
-        (0x2c, _) => 'z' as u32,
-        (0x2d, _) => 'x' as u32,
-        (0x2e, _) => 'c' as u32,
-        (0x2f, _) => 'v' as u32,
-        (0x30, _) => 'b' as u32,
-        (0x31, _) => 'n' as u32,
-        (0x32, _) => 'm' as u32,
         (0x33, _) => ',' as u32,
         (0x34, _) => '.' as u32,
         (0x35, false) => '/' as u32,
@@ -481,34 +535,101 @@ fn keysym_from_scancode(code: u8, extended: bool) -> Option<u32> {
         (0x44, _) => 0xffc7,     // F10
         (0x45, _) => 0xff7f,     // Num_Lock
         (0x46, _) => 0xff14,     // Scroll_Lock
-        (0x47, false) => 0xffb7, // KP_7
         (0x47, true) => 0xff50,  // Home
-        (0x48, false) => 0xffb8, // KP_8
         (0x48, true) => 0xff52,  // Up
-        (0x49, false) => 0xffb9, // KP_9
         (0x49, true) => 0xff55,  // Page_Up
         (0x4a, _) => 0xffad,     // KP_Subtract
-        (0x4b, false) => 0xffb4, // KP_4
         (0x4b, true) => 0xff51,  // Left
-        (0x4c, false) => 0xffb5, // KP_5
-        (0x4d, false) => 0xffb6, // KP_6
         (0x4d, true) => 0xff53,  // Right
         (0x4e, _) => 0xffab,     // KP_Add
-        (0x4f, false) => 0xffb1, // KP_1
         (0x4f, true) => 0xff57,  // End
-        (0x50, false) => 0xffb2, // KP_2
         (0x50, true) => 0xff54,  // Down
-        (0x51, false) => 0xffb3, // KP_3
         (0x51, true) => 0xff56,  // Page_Down
-        (0x52, false) => 0xffb0, // KP_0
         (0x52, true) => 0xff63,  // Insert
-        (0x53, false) => 0xffae, // KP_Decimal
         (0x53, true) => 0xffff,  // Delete
         (0x57, _) => 0xffc8,     // F11
         (0x58, _) => 0xffc9,     // F12
         (0x5b, _) => 0xffeb,     // Super_L
         (0x5c, _) => 0xffec,     // Super_R
         (0x5d, _) => 0xff67,     // Menu
+        _ => return None,
+    };
+
+    Some(keysym)
+}
+
+fn alpha_from_scancode(code: u8) -> Option<char> {
+    match code {
+        0x10 => Some('q'),
+        0x11 => Some('w'),
+        0x12 => Some('e'),
+        0x13 => Some('r'),
+        0x14 => Some('t'),
+        0x15 => Some('y'),
+        0x16 => Some('u'),
+        0x17 => Some('i'),
+        0x18 => Some('o'),
+        0x19 => Some('p'),
+        0x1E => Some('a'),
+        0x1F => Some('s'),
+        0x20 => Some('d'),
+        0x21 => Some('f'),
+        0x22 => Some('g'),
+        0x23 => Some('h'),
+        0x24 => Some('j'),
+        0x25 => Some('k'),
+        0x26 => Some('l'),
+        0x2C => Some('z'),
+        0x2D => Some('x'),
+        0x2E => Some('c'),
+        0x2F => Some('v'),
+        0x30 => Some('b'),
+        0x31 => Some('n'),
+        0x32 => Some('m'),
+        _ => None,
+    }
+}
+
+fn printable_symbol_from_scancode(code: u8) -> Option<(char, char)> {
+    match code {
+        0x02 => Some(('1', '!')),
+        0x03 => Some(('2', '@')),
+        0x04 => Some(('3', '#')),
+        0x05 => Some(('4', '$')),
+        0x06 => Some(('5', '%')),
+        0x07 => Some(('6', '^')),
+        0x08 => Some(('7', '&')),
+        0x09 => Some(('8', '*')),
+        0x0A => Some(('9', '(')),
+        0x0B => Some(('0', ')')),
+        0x0C => Some(('-', '_')),
+        0x0D => Some(('=', '+')),
+        0x1A => Some(('[', '{')),
+        0x1B => Some((']', '}')),
+        0x27 => Some((';', ':')),
+        0x28 => Some(('\'', '"')),
+        0x29 => Some(('`', '~')),
+        0x2B => Some(('\\', '|')),
+        0x33 => Some((',', '<')),
+        0x34 => Some(('.', '>')),
+        0x35 => Some(('/', '?')),
+        _ => None,
+    }
+}
+
+fn numpad_keysym_from_scancode(code: u8, num_lock: bool) -> Option<u32> {
+    let keysym = match code {
+        0x47 => if num_lock { 0xffb7 } else { 0xff50 },
+        0x48 => if num_lock { 0xffb8 } else { 0xff52 },
+        0x49 => if num_lock { 0xffb9 } else { 0xff55 },
+        0x4B => if num_lock { 0xffb4 } else { 0xff51 },
+        0x4C => 0xffb5,
+        0x4D => if num_lock { 0xffb6 } else { 0xff53 },
+        0x4F => if num_lock { 0xffb1 } else { 0xff57 },
+        0x50 => if num_lock { 0xffb2 } else { 0xff54 },
+        0x51 => if num_lock { 0xffb3 } else { 0xff56 },
+        0x52 => if num_lock { 0xffb0 } else { 0xff63 },
+        0x53 => if num_lock { 0xffae } else { 0xffff },
         _ => return None,
     };
 
@@ -524,24 +645,70 @@ async fn sync_keyboard_indicators(
     // Use a conservative baseline and actively toggle toward local state.
     let state = remote_lock_state.get_or_insert(KeyboardIndicators::default());
 
+    info!(
+        "[VNC][LOCK] sync compare remote(num={} caps={} scroll={}) local(num={} caps={} scroll={})",
+        state.num_lock,
+        state.caps_lock,
+        state.scroll_lock,
+        local.num_lock,
+        local.caps_lock,
+        local.scroll_lock
+    );
+
     if state.caps_lock != local.caps_lock {
+        info!(
+            "[VNC][LOCK] toggling CapsLock remote={} -> local={}",
+            state.caps_lock, local.caps_lock
+        );
         send_lock_toggle(vnc, 0xffe5).await?; // Caps_Lock
         state.caps_lock = local.caps_lock;
     }
     if state.num_lock != local.num_lock {
+        info!(
+            "[VNC][LOCK] toggling NumLock remote={} -> local={}",
+            state.num_lock, local.num_lock
+        );
         send_lock_toggle(vnc, 0xff7f).await?; // Num_Lock
         state.num_lock = local.num_lock;
     }
     if state.scroll_lock != local.scroll_lock {
+        info!(
+            "[VNC][LOCK] toggling ScrollLock remote={} -> local={}",
+            state.scroll_lock, local.scroll_lock
+        );
         send_lock_toggle(vnc, 0xff14).await?; // Scroll_Lock
         state.scroll_lock = local.scroll_lock;
     }
+
+    info!(
+        "[VNC][LOCK] sync result remote(num={} caps={} scroll={})",
+        state.num_lock, state.caps_lock, state.scroll_lock
+    );
 
     Ok(())
 }
 
 async fn send_lock_toggle(vnc: &VncClient, keysym: u32) -> Result<(), String> {
-    debug!("[VNC] lock toggle keysym=0x{:x}", keysym);
+    info!("[VNC][LOCK] toggle keysym=0x{:X} down=true", keysym);
     send_key(vnc, keysym, true).await?;
+    info!("[VNC][LOCK] toggle keysym=0x{:X} down=false", keysym);
     send_key(vnc, keysym, false).await
+}
+
+fn is_lock_scancode(code: u8) -> bool {
+    matches!(code, 0x3A | 0x45 | 0x46)
+}
+
+fn is_modifier_scancode(code: u8, extended: bool) -> bool {
+    matches!(
+        (code, extended),
+        (0x2A, false)
+            | (0x36, false)
+            | (0x1D, false)
+            | (0x1D, true)
+            | (0x38, false)
+            | (0x38, true)
+            | (0x5B, true)
+            | (0x5C, true)
+    )
 }

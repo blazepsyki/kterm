@@ -16,10 +16,12 @@ pub fn route_key_pressed(
     physical_key: &keyboard::key::Physical,
 ) -> RoutedKeyEvent {
     if is_lock_key_event(physical_key, key) {
-        return RoutedKeyEvent::SyncIndicators;
+        return RoutedKeyEvent::Ignore;
     }
 
-    if let Some((code, extended)) = map_key_to_rdp_scancode(physical_key) {
+    if let Some((code, extended)) = map_physical_key_to_scancode(physical_key)
+        .or_else(|| map_named_key_to_scancode(key))
+    {
         return RoutedKeyEvent::Input(RemoteInput::KeyboardScancode {
             code,
             extended,
@@ -48,7 +50,9 @@ pub fn route_key_released(
         return RoutedKeyEvent::SyncIndicators;
     }
 
-    if let Some((code, extended)) = map_key_to_rdp_scancode(physical_key) {
+    if let Some((code, extended)) = map_physical_key_to_scancode(physical_key)
+        .or_else(|| map_named_key_to_scancode(key))
+    {
         return RoutedKeyEvent::Input(RemoteInput::KeyboardScancode {
             code,
             extended,
@@ -151,7 +155,7 @@ fn is_lock_key_event(physical_key: &keyboard::key::Physical, key: &keyboard::Key
     }
 }
 
-fn map_key_to_rdp_scancode(physical_key: &keyboard::key::Physical) -> Option<(u8, bool)> {
+fn map_physical_key_to_scancode(physical_key: &keyboard::key::Physical) -> Option<(u8, bool)> {
     use keyboard::key::{Code, Physical};
 
     let Physical::Code(code) = physical_key else {
@@ -257,6 +261,18 @@ fn map_key_to_rdp_scancode(physical_key: &keyboard::key::Physical) -> Option<(u8
         Code::F10 => Some((0x44, false)),
         Code::F11 => Some((0x57, false)),
         Code::F12 => Some((0x58, false)),
+        _ => None,
+    }
+}
+
+fn map_named_key_to_scancode(key: &keyboard::Key) -> Option<(u8, bool)> {
+    use keyboard::key::Named;
+
+    match key {
+        keyboard::Key::Named(Named::Shift) => Some((0x2A, false)),
+        keyboard::Key::Named(Named::Control) => Some((0x1D, false)),
+        keyboard::Key::Named(Named::Alt) => Some((0x38, false)),
+        keyboard::Key::Named(Named::Super) => Some((0x5B, true)),
         _ => None,
     }
 }

@@ -6,6 +6,7 @@ use std::io::Write as _;
 use std::time::Duration;
 
 use iced::futures::{self, StreamExt};
+use log::warn;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 
@@ -210,7 +211,7 @@ async fn run_rdp_worker_inner(
                             } else { None }
                         }
                         ClipboardMessage::Error(e) => {
-                            eprintln!("[CLIPRDR] OS clipboard error: {}", e);
+                            warn!("[CLIPRDR] OS clipboard error: {}", e);
                             None
                         }
                     };
@@ -227,7 +228,7 @@ async fn run_rdp_worker_inner(
                                 }
                             }
                             Err(e) => {
-                                eprintln!("[CLIPRDR] process_svc_processor_messages error: {:?}", e);
+                                warn!("[CLIPRDR] process_svc_processor_messages error: {:?}", e);
                             }
                         }
                     }

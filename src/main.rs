@@ -3,6 +3,7 @@
 use iced::widget::{button, column, container, pick_list, row, scrollable, text, vertical_slider, Space, text_input, Id, mouse_area, stack, shader};
 use iced::{Background, Color, Element, Length, Task, Subscription, event, keyboard, advanced::input_method, Font, font::Weight, mouse};
 use iced::widget::operation::focus;
+use env_logger::Env;
 use iced::window;
 use std::collections::HashSet;
 use std::env;
@@ -70,6 +71,10 @@ fn rdp_trace_enabled() -> bool {
 }
 
 pub fn main() -> iced::Result {
+    let _ = env_logger::Builder::from_env(Env::default().default_filter_or("info"))
+        .format_timestamp_millis()
+        .try_init();
+
     iced::application(
         || {
             let font_task = iced::font::load(include_bytes!("../assets/fonts/D2Coding.ttf")).map(Message::FontLoaded);
@@ -500,12 +505,10 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                     }
                     connection::ConnectionEvent::Data(data) => {
                         if matches!(session.kind, SessionKind::RemoteDisplay) {
-                            if let Some(display) = session.remote_display.as_mut() {
-                                if !data.is_empty() {
-                                    let msg = String::from_utf8_lossy(&data).trim().to_string();
-                                    if !msg.is_empty() {
-                                        display.status_message = Some(msg);
-                                    }
+                            if !data.is_empty() {
+                                let msg = String::from_utf8_lossy(&data).trim().to_string();
+                                if !msg.is_empty() {
+                                    log::info!("[REMOTE] {}", msg);
                                 }
                             }
                         } else if !data.is_empty() {
@@ -759,7 +762,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                             (Some(factory), Some(cb_rx))
                         }
                         Err(e) => {
-                            eprintln!("[CLIPRDR] WinClipboard creation failed: {}", e);
+                            log::info!("[CLIPRDR] WinClipboard creation failed: {}", e);
                             (None, None)
                         }
                     }
