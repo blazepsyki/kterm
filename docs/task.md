@@ -51,6 +51,8 @@
   - [ ] 탭 종료/예외 상황 안정화 및 회귀 테스트
   - [ ] 상세 작업 문서: `docs/rdp_integration_plan.md`
 - [ ] 14단계: VNC 그래픽 연결 인터페이스 구현
+  - [x] `docs/vnc_integration_plan.md` 계획 문서 작성 및 착수 범위 확정
+  - [x] VNC UI 라우팅/백엔드 워커 초기 구현 착수 (MVP 골격)
   - [ ] `src/connection/vnc.rs` 구현
   - [ ] 공용 `remote_display` 모듈에 VNC 프레임 연결
   - [ ] VNC 입력 이벤트(키보드/마우스) 연결

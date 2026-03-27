@@ -11,7 +11,7 @@ mod terminal;
 mod connection;
 mod platform;
 mod remote_display;
-use connection::rdp_input_policy::{
+use connection::remote_input_policy::{
     current_keyboard_indicators, is_remote_secure_attention_key,
     is_remote_secure_attention_shortcut, remote_secure_attention_inputs, route_key_pressed,
     route_key_released, unicode_inputs_for_text, RoutedKeyEvent,
@@ -92,6 +92,7 @@ pub enum ProtocolMode {
     Serial,
     Local,
     Rdp,
+    Vnc,
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +229,9 @@ struct State {
     rdp_port: String,
     rdp_user: String,
     rdp_pass: String,
+    vnc_host: String,
+    vnc_port: String,
+    vnc_pass: String,
     local_shells: Vec<LocalShellOption>,
     selected_local_shell: usize,
     ssh_id_host: Id,
@@ -242,6 +246,9 @@ struct State {
     rdp_id_port: Id,
     rdp_id_user: Id,
     rdp_id_pass: Id,
+    vnc_id_host: Id,
+    vnc_id_port: Id,
+    vnc_id_pass: Id,
     focused_field: usize,
     pub window_id: Option<window::Id>,
     pub dummy_menu_open: Option<&'static str>,
@@ -267,6 +274,9 @@ impl Default for State {
             rdp_port: "3389".to_string(),
             rdp_user: "".to_string(),
             rdp_pass: "".to_string(),
+            vnc_host: "".to_string(),
+            vnc_port: "5900".to_string(),
+            vnc_pass: "".to_string(),
             local_shells,
             selected_local_shell: 0,
             ssh_id_host: Id::new("ssh_host"),
@@ -281,6 +291,9 @@ impl Default for State {
             rdp_id_port: Id::new("rdp_port"),
             rdp_id_user: Id::new("rdp_user"),
             rdp_id_pass: Id::new("rdp_pass"),
+            vnc_id_host: Id::new("vnc_host"),
+            vnc_id_port: Id::new("vnc_port"),
+            vnc_id_pass: Id::new("vnc_pass"),
             focused_field: 0,
             window_id: None,
             dummy_menu_open: None,
@@ -313,6 +326,11 @@ impl State {
                 self.rdp_id_user.clone(),
                 self.rdp_id_pass.clone(),
             ],
+            ProtocolMode::Vnc => vec![
+                self.vnc_id_host.clone(),
+                self.vnc_id_port.clone(),
+                self.vnc_id_pass.clone(),
+            ],
             ProtocolMode::Local => vec![],
         }
     }
@@ -343,6 +361,9 @@ pub enum Message {
     RdpPortChanged(String),
     RdpUserChanged(String),
     RdpPassChanged(String),
+    VncHostChanged(String),
+    VncPortChanged(String),
+    VncPassChanged(String),
     SelectProtocol(ProtocolMode),
     SelectLocalShell(usize),
     ConnectSsh,
@@ -350,6 +371,7 @@ pub enum Message {
     ConnectLocal,
     ConnectSerial,
     ConnectRdp,
+    ConnectVnc,
     TabPressed(bool),
     FieldFocused(usize),
     WindowIdCaptured(window::Id),
@@ -541,6 +563,9 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::RdpPortChanged(s) => { state.rdp_port = s; Task::none() }
         Message::RdpUserChanged(s) => { state.rdp_user = s; Task::none() }
         Message::RdpPassChanged(s) => { state.rdp_pass = s; Task::none() }
+        Message::VncHostChanged(s) => { state.vnc_host = s; Task::none() }
+        Message::VncPortChanged(s) => { state.vnc_port = s; Task::none() }
+        Message::VncPassChanged(s) => { state.vnc_pass = s; Task::none() }
         Message::SelectProtocol(mode) => {
             state.welcome_protocol = mode;
             state.focused_field = 0;
@@ -669,6 +694,29 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
 
                 Task::run(
                     connection::rdp::connect_and_subscribe(host, port, user, pass, cliprdr_factory, clipboard_rx_opt),
+                    move |event| Message::ConnectionMessage(target_id, event),
+                )
+            } else {
+                Task::none()
+            }
+        }
+        Message::ConnectVnc => {
+            let host = state.vnc_host.clone();
+            let port: u16 = state.vnc_port.parse().unwrap_or(5900);
+            let pass = state.vnc_pass.clone();
+            let pass_opt = if pass.is_empty() { None } else { Some(pass) };
+            let name = format!("VNC: {}:{}", host, port);
+
+            let target_index = state.active_index;
+            let mut target_id = None;
+            if let Some(session) = state.sessions.get_mut(target_index) {
+                target_id = Some(session.id);
+                *session = Session::new_remote_display(session.id, name, 1280, 720);
+            }
+
+            if let Some(target_id) = target_id {
+                Task::run(
+                    connection::vnc::connect_and_subscribe(host, port, pass_opt),
                     move |event| Message::ConnectionMessage(target_id, event),
                 )
             } else {
@@ -1240,6 +1288,7 @@ fn view(state: &State) -> Element<'_, Message> {
                     protocol_btn(ProtocolMode::Serial, "Serial", &state.welcome_protocol),
                     protocol_btn(ProtocolMode::Local, "Local Shell", &state.welcome_protocol),
                     protocol_btn(ProtocolMode::Rdp, "RDP", &state.welcome_protocol),
+                    protocol_btn(ProtocolMode::Vnc, "VNC", &state.welcome_protocol),
                 ].spacing(10);
 
                 let form_content: Element<'_, Message> = match state.welcome_protocol {
@@ -1300,6 +1349,16 @@ fn view(state: &State) -> Element<'_, Message> {
                         row![text("Password: ").width(100), text_input("pass", &state.rdp_pass).id(state.rdp_id_pass.clone()).on_input(Message::RdpPassChanged).secure(true).width(300).on_submit(Message::ConnectRdp)],
                         Space::new().height(Length::Fixed(10.0)),
                         button(container(text("Connect")).center_x(Length::Fill).center_y(Length::Fill)).padding(12).width(Length::Fill).style(button::primary).on_press(Message::ConnectRdp)
+                    ].spacing(15).into(),
+                    ProtocolMode::Vnc => column![
+                        text("VNC Connection").size(20).font(Font { weight: Weight::Bold, ..Default::default() }),
+                        hr(),
+                        row![text("Host: ").width(100), text_input("IP Address", &state.vnc_host).id(state.vnc_id_host.clone()).on_input(Message::VncHostChanged).width(300)],
+                        row![text("Port: ").width(100), text_input("5900", &state.vnc_port).id(state.vnc_id_port.clone()).on_input(Message::VncPortChanged).width(150)],
+                        row![text("Password: ").width(100), text_input("optional", &state.vnc_pass).id(state.vnc_id_pass.clone()).on_input(Message::VncPassChanged).secure(true).width(300).on_submit(Message::ConnectVnc)],
+                        text("Password is optional for servers allowing None auth.").size(12).color(Color::from_rgb(0.6, 0.6, 0.6)),
+                        Space::new().height(Length::Fixed(10.0)),
+                        button(container(text("Connect")).center_x(Length::Fill).center_y(Length::Fill)).padding(12).width(Length::Fill).style(button::primary).on_press(Message::ConnectVnc)
                     ].spacing(15).into(),
                 };
 
@@ -1442,6 +1501,7 @@ fn view(state: &State) -> Element<'_, Message> {
                         button(text("New Serial Session").size(12)).width(Length::Fill).style(button::text).on_press(Message::OpenProtocolTab(ProtocolMode::Serial)),
                         button(text("New Local Session").size(12)).width(Length::Fill).style(button::text).on_press(Message::OpenProtocolTab(ProtocolMode::Local)),
                         button(text("New RDP Session").size(12)).width(Length::Fill).style(button::text).on_press(Message::OpenProtocolTab(ProtocolMode::Rdp)),
+                        button(text("New VNC Session").size(12)).width(Length::Fill).style(button::text).on_press(Message::OpenProtocolTab(ProtocolMode::Vnc)),
                         hr(),
                         button(text("Close Current Tab").size(12)).width(Length::Fill).style(button::text).on_press(Message::CloseTab(state.active_index))
                     ]

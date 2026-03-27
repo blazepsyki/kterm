@@ -5,7 +5,8 @@ pub mod ssh;
 pub mod telnet;
 pub mod serial;
 pub mod rdp;
-pub mod rdp_input_policy;
+pub mod vnc;
+pub mod remote_input_policy;
 
 use crate::remote_display::FrameUpdate;
 use tokio::sync::mpsc;

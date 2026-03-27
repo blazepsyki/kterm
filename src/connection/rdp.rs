@@ -49,7 +49,7 @@ use ironrdp_tokio::{
     Framed, FramedWrite, MovableTokioStream,
 };
 
-use crate::connection::rdp_input_policy::is_numlock_conflict_scancode;
+use crate::connection::remote_input_policy::is_numlock_conflict_scancode;
 use crate::connection::{ConnectionEvent, ConnectionInput, KeyboardIndicators, RemoteInput, RemoteMouseButton};
 use crate::remote_display::FrameUpdate;
 
