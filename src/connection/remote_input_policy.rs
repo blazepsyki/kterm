@@ -16,7 +16,7 @@ pub fn route_key_pressed(
     physical_key: &keyboard::key::Physical,
 ) -> RoutedKeyEvent {
     if is_lock_key_event(physical_key, key) {
-        return RoutedKeyEvent::Ignore;
+        return RoutedKeyEvent::SyncIndicators;
     }
 
     if let Some((code, extended)) = map_key_to_rdp_scancode(physical_key) {

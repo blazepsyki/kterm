@@ -3,7 +3,10 @@
 pub mod renderer;
 
 use renderer::DirtyRect;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+static NEXT_DISPLAY_SOURCE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone)]
 pub enum FrameUpdate {
@@ -23,11 +26,13 @@ pub enum FrameUpdate {
 
 #[derive(Debug, Clone)]
 pub struct RemoteDisplayState {
+    pub source_id: u64,
     pub width: u16,
     pub height: u16,
     pub rgba: Arc<Vec<u8>>,
     pub dirty_rects: Vec<DirtyRect>,
     pub full_upload: bool,
+    pub frame_seq: u64,
     pub frame_ready: bool,
     pub status_message: Option<String>,
 }
@@ -36,11 +41,13 @@ impl RemoteDisplayState {
     pub fn new(width: u16, height: u16) -> Self {
         let len = width as usize * height as usize * 4;
         Self {
+            source_id: NEXT_DISPLAY_SOURCE_ID.fetch_add(1, Ordering::Relaxed),
             width,
             height,
             rgba: Arc::new(vec![0; len]),
             dirty_rects: Vec::new(),
             full_upload: true,
+            frame_seq: 0,
             frame_ready: false,
             status_message: None,
         }
@@ -57,6 +64,7 @@ impl RemoteDisplayState {
                 *buf = rgba;
                 self.full_upload = true;
                 self.dirty_rects.clear();
+                self.frame_seq = self.frame_seq.wrapping_add(1);
                 self.frame_ready = true;
             }
             FrameUpdate::Rect {
@@ -100,23 +108,29 @@ impl RemoteDisplayState {
                     }
                 }
 
-                if !self.full_upload {
-                    self.dirty_rects.push(DirtyRect {
-                        x: x as u32,
-                        y: y as u32,
-                        width: rect_w as u32,
-                        height: rect_h as u32,
-                    });
+                if self.full_upload {
+                    // After an initial full frame, switch to incremental updates.
+                    self.full_upload = false;
+                    self.dirty_rects.clear();
                 }
+
+                self.dirty_rects.push(DirtyRect {
+                    x: x as u32,
+                    y: y as u32,
+                    width: rect_w as u32,
+                    height: rect_h as u32,
+                });
+
+                // If too many dirty rects accumulate, a full upload is cheaper.
+                if self.dirty_rects.len() > 256 {
+                    self.full_upload = true;
+                    self.dirty_rects.clear();
+                }
+
+                self.frame_seq = self.frame_seq.wrapping_add(1);
                 self.frame_ready = true;
             }
         }
     }
 
-    /// Called after the shader widget has consumed the current dirty state.
-    pub fn mark_clean(&mut self) {
-        self.dirty_rects.clear();
-        self.full_upload = false;
-        self.frame_ready = false;
-    }
 }

@@ -52,7 +52,11 @@
   - [ ] 상세 작업 문서: `docs/rdp_integration_plan.md`
 - [ ] 14단계: VNC 그래픽 연결 인터페이스 구현
   - [x] `docs/vnc_integration_plan.md` 계획 문서 작성 및 착수 범위 확정
+  - [x] Full Track 계획 병합 반영 (`docs/vnc_integration_plan.md`)
   - [x] VNC UI 라우팅/백엔드 워커 초기 구현 착수 (MVP 골격)
+  - [x] Phase B 착수: 연결 안정화(연결 타임아웃/인증 경고/초기 FullRefresh)
+  - [x] Phase D 착수: 증분 렌더 경로(frame_seq + dirty_rects 실배선) 적용
+  - [x] Phase E 착수: 락키 동기화(Caps/Num/Scroll) 처리 추가
   - [ ] `src/connection/vnc.rs` 구현
   - [ ] 공용 `remote_display` 모듈에 VNC 프레임 연결
   - [ ] VNC 입력 이벤트(키보드/마우스) 연결

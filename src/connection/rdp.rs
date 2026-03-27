@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Write as _;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use iced::futures::{self, StreamExt};
 use tokio::sync::mpsc;
@@ -161,10 +161,11 @@ async fn run_rdp_worker_inner(
     let mut graphics_updates = 0usize;
     let mut response_frames = 0usize;
     let mut processed_pdus = 0usize;
-    let mut last_frame_emit = Instant::now();
     let mut pending_rect: Option<InclusiveRectangle> = None;
     let mut input_db = Database::new();
     let mut last_indicators: Option<KeyboardIndicators> = None;
+    let mut frame_tick = tokio::time::interval(Duration::from_millis(16));
+    frame_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let summary = format!(
         "\r\n[RDP] IronRDP handshake completed: server={} port={} desktop={}x{}\r\n",
@@ -174,6 +175,14 @@ async fn run_rdp_worker_inner(
 
     loop {
         tokio::select! {
+            _ = frame_tick.tick() => {
+                if let Some(rect) = pending_rect.take() {
+                    if let Some(update) = rect_update_from_image(&image, rect) {
+                        let _ = tx_from_worker.send(ConnectionEvent::Frames(vec![update]));
+                    }
+                }
+            }
+
             maybe_clipboard_msg = async {
                 if let Some(ref mut rx) = clipboard_rx {
                     rx.recv().await
@@ -318,15 +327,6 @@ async fn run_rdp_worker_inner(
                                 Some(prev) => merge_rect(prev, rect),
                                 None => rect,
                             });
-
-                            if last_frame_emit.elapsed() >= Duration::from_millis(16) {
-                                if let Some(r) = pending_rect.take() {
-                                    if let Some(update) = rect_update_from_image(&image, r) {
-                                        let _ = tx_from_worker.send(ConnectionEvent::Frames(vec![update]));
-                                    }
-                                }
-                                last_frame_emit = Instant::now();
-                            }
                         }
                         ActiveStageOutput::Terminate(reason) => {
                             let summary = format!(
@@ -367,16 +367,6 @@ async fn run_rdp_worker_inner(
                     }
                 }
             }
-        }
-
-        // 50ms fallback: flush accumulated dirty rect if 16ms emitter didn't fire recently.
-        if graphics_updates > 0 && last_frame_emit.elapsed() >= Duration::from_millis(50) {
-            if let Some(rect) = pending_rect.take() {
-                if let Some(update) = rect_update_from_image(&image, rect) {
-                    let _ = tx_from_worker.send(ConnectionEvent::Frames(vec![update]));
-                }
-            }
-            last_frame_emit = Instant::now();
         }
 
         // Forward GFX DVC frames (Phase 9-B-1) to the UI without blocking.
@@ -592,7 +582,6 @@ fn log_x224_pdu(log: &mut std::fs::File, pdu_n: usize, frame: &[u8]) {
     };
 
     let channel_id = data_ctx.channel_id;
-    let initiator_id = data_ctx.initiator_id;
 
     let Ok(io_pdu) = connector::legacy::decode_io_channel(data_ctx) else {
         // Non-IO channel (SVC data: rdpsnd, drdynvc, cliprdr, …)

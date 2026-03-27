@@ -32,6 +32,12 @@ pub struct RdpPipeline {
     uniform_buf: wgpu::Buffer,
     tex_width: u32,
     tex_height: u32,
+    last_uploaded_seq: u64,
+    last_uploaded_source: u64,
+    last_viewport_x: f32,
+    last_viewport_y: f32,
+    last_viewport_width: u32,
+    last_viewport_height: u32,
 }
 
 impl RdpPipeline {
@@ -173,6 +179,12 @@ impl shader::Pipeline for RdpPipeline {
             uniform_buf,
             tex_width: 1,
             tex_height: 1,
+            last_uploaded_seq: u64::MAX,
+            last_uploaded_source: u64::MAX,
+            last_viewport_x: 0.0,
+            last_viewport_y: 0.0,
+            last_viewport_width: 1,
+            last_viewport_height: 1,
         }
     }
 }
@@ -186,6 +198,8 @@ pub struct RdpFrame {
     pub tex_height: u32,
     pub dirty_rects: Vec<DirtyRect>,
     pub full_upload: bool,
+    pub frame_seq: u64,
+    pub source_id: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -209,6 +223,8 @@ impl shader::Primitive for RdpFrame {
     ) {
         let tw = self.tex_width;
         let th = self.tex_height;
+        let mut texture_recreated = false;
+        let source_changed = self.source_id != pipeline.last_uploaded_source;
 
         // Recreate texture if the desktop size changed.
         if tw != pipeline.tex_width || th != pipeline.tex_height {
@@ -220,64 +236,76 @@ impl shader::Primitive for RdpFrame {
             pipeline.bind_group = bind_group;
             pipeline.tex_width = tw;
             pipeline.tex_height = th;
+            texture_recreated = true;
         }
 
-        // Upload pixel data to GPU texture.
-        let stride = tw as usize * 4;
+        // Upload pixel data when a newer frame arrives OR the backing source changed.
+        if self.frame_seq != pipeline.last_uploaded_seq || source_changed {
+            let stride = tw as usize * 4;
 
-        if self.full_upload {
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &pipeline.texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &self.rgba,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(stride as u32),
-                    rows_per_image: Some(th),
-                },
-                wgpu::Extent3d { width: tw, height: th, depth_or_array_layers: 1 },
-            );
-        } else {
-            for r in &self.dirty_rects {
-                let row_bytes = r.width as usize * 4;
-                let mut rect_data = Vec::with_capacity(row_bytes * r.height as usize);
-                for row in 0..r.height as usize {
-                    let src_y = r.y as usize + row;
-                    let src_start = src_y * stride + r.x as usize * 4;
-                    let src_end = src_start + row_bytes;
-                    if src_end <= self.rgba.len() {
-                        rect_data.extend_from_slice(&self.rgba[src_start..src_end]);
+            // On source switch (e.g., tab/session switch), force a full upload
+            // to avoid mixing stale texture data from another remote session.
+            if texture_recreated || source_changed || self.full_upload {
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &pipeline.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &self.rgba,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(stride as u32),
+                        rows_per_image: Some(th),
+                    },
+                    wgpu::Extent3d { width: tw, height: th, depth_or_array_layers: 1 },
+                );
+            } else {
+                for r in &self.dirty_rects {
+                    let row_bytes = r.width as usize * 4;
+                    let mut rect_data = Vec::with_capacity(row_bytes * r.height as usize);
+                    for row in 0..r.height as usize {
+                        let src_y = r.y as usize + row;
+                        let src_start = src_y * stride + r.x as usize * 4;
+                        let src_end = src_start + row_bytes;
+                        if src_end <= self.rgba.len() {
+                            rect_data.extend_from_slice(&self.rgba[src_start..src_end]);
+                        }
+                    }
+                    if !rect_data.is_empty() {
+                        queue.write_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: &pipeline.texture,
+                                mip_level: 0,
+                                origin: wgpu::Origin3d { x: r.x, y: r.y, z: 0 },
+                                aspect: wgpu::TextureAspect::All,
+                            },
+                            &rect_data,
+                            wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(r.width * 4),
+                                rows_per_image: Some(r.height),
+                            },
+                            wgpu::Extent3d { width: r.width, height: r.height, depth_or_array_layers: 1 },
+                        );
                     }
                 }
-                if !rect_data.is_empty() {
-                    queue.write_texture(
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &pipeline.texture,
-                            mip_level: 0,
-                            origin: wgpu::Origin3d { x: r.x, y: r.y, z: 0 },
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        &rect_data,
-                        wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(r.width * 4),
-                            rows_per_image: Some(r.height),
-                        },
-                        wgpu::Extent3d { width: r.width, height: r.height, depth_or_array_layers: 1 },
-                    );
-                }
             }
+
+            pipeline.last_uploaded_seq = self.frame_seq;
+            pipeline.last_uploaded_source = self.source_id;
         }
 
         // Update uniforms (viewport size for aspect-ratio correction in shader).
         let uniforms = Uniforms {
-            viewport: [bounds.width, bounds.height],
-            tex_size: [tw as f32, th as f32],
+            viewport: [bounds.width.max(1.0), bounds.height.max(1.0)],
+            tex_size: [(tw as f32).max(1.0), (th as f32).max(1.0)],
         };
+        pipeline.last_viewport_x = bounds.x;
+        pipeline.last_viewport_y = bounds.y;
+        pipeline.last_viewport_width = bounds.width.max(1.0).round() as u32;
+        pipeline.last_viewport_height = bounds.height.max(1.0).round() as u32;
         queue.write_buffer(&pipeline.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
     }
 
@@ -288,6 +316,36 @@ impl shader::Primitive for RdpFrame {
         target: &wgpu::TextureView,
         clip_bounds: &Rectangle<u32>,
     ) {
+        // `clip_bounds` in iced can represent only the current damage region.
+        // Keep viewport tied to widget bounds and use scissor for clipping.
+        let vp_x = pipeline.last_viewport_x;
+        let vp_y = pipeline.last_viewport_y;
+        let vp_w = pipeline.last_viewport_width.max(1) as f32;
+        let vp_h = pipeline.last_viewport_height.max(1) as f32;
+
+        let fallback_scissor_x = pipeline.last_viewport_x.max(0.0).round() as u32;
+        let fallback_scissor_y = pipeline.last_viewport_y.max(0.0).round() as u32;
+        let scissor_x = if clip_bounds.width == 0 || clip_bounds.height == 0 {
+            fallback_scissor_x
+        } else {
+            clip_bounds.x
+        };
+        let scissor_y = if clip_bounds.width == 0 || clip_bounds.height == 0 {
+            fallback_scissor_y
+        } else {
+            clip_bounds.y
+        };
+        let scissor_w = if clip_bounds.width == 0 {
+            pipeline.last_viewport_width.max(1)
+        } else {
+            clip_bounds.width
+        };
+        let scissor_h = if clip_bounds.height == 0 {
+            pipeline.last_viewport_height.max(1)
+        } else {
+            clip_bounds.height
+        };
+
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("rdp_render_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -304,14 +362,14 @@ impl shader::Primitive for RdpFrame {
             occlusion_query_set: None,
         });
         pass.set_viewport(
-            clip_bounds.x as f32,
-            clip_bounds.y as f32,
-            clip_bounds.width as f32,
-            clip_bounds.height as f32,
+            vp_x,
+            vp_y,
+            vp_w,
+            vp_h,
             0.0,
             1.0,
         );
-        pass.set_scissor_rect(clip_bounds.x, clip_bounds.y, clip_bounds.width, clip_bounds.height);
+        pass.set_scissor_rect(scissor_x, scissor_y, scissor_w, scissor_h);
         pass.set_pipeline(&pipeline.render_pipeline);
         pass.set_bind_group(0, &pipeline.bind_group, &[]);
         pass.draw(0..3, 0..1);
@@ -326,6 +384,8 @@ pub struct RdpDisplayProgram {
     pub tex_height: u32,
     pub dirty_rects: Vec<DirtyRect>,
     pub full_upload: bool,
+    pub frame_seq: u64,
+    pub source_id: u64,
 }
 
 impl<Message> shader::Program<Message> for RdpDisplayProgram {
@@ -344,6 +404,8 @@ impl<Message> shader::Program<Message> for RdpDisplayProgram {
             tex_height: self.tex_height,
             dirty_rects: self.dirty_rects.clone(),
             full_upload: self.full_upload,
+            frame_seq: self.frame_seq,
+            source_id: self.source_id,
         }
     }
 }

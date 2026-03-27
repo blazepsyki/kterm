@@ -11,8 +11,14 @@ use vnc::{
     VncError, VncEvent, X11Event,
 };
 
-use super::{ConnectionEvent, ConnectionInput, RemoteInput, RemoteMouseButton};
+use super::{
+    ConnectionEvent, ConnectionInput, KeyboardIndicators, RemoteInput, RemoteMouseButton,
+};
 use crate::remote_display::FrameUpdate;
+
+const VNC_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const VNC_REFRESH_INTERVAL: Duration = Duration::from_millis(16);
+const VNC_AUTH_PASSWORD_LIMIT: usize = 8;
 
 pub fn connect_and_subscribe(
     host: String,
@@ -89,11 +95,30 @@ async fn run_vnc_worker_inner(
 ) -> Result<(), String> {
     info!("[VNC] connecting to {}:{}", host, port);
 
-    let tcp = tokio::net::TcpStream::connect((host.as_str(), port))
-        .await
-        .map_err(|e| format!("VNC TCP connect failed: {}", e))?;
+    let tcp = tokio::time::timeout(
+        VNC_CONNECT_TIMEOUT,
+        tokio::net::TcpStream::connect((host.as_str(), port)),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "VNC TCP connect timed out after {}s",
+            VNC_CONNECT_TIMEOUT.as_secs()
+        )
+    })?
+    .map_err(|e| format!("VNC TCP connect failed: {}", e))?;
 
     let auth_password = password.unwrap_or_default();
+    if auth_password.chars().count() > VNC_AUTH_PASSWORD_LIMIT {
+        let _ = tx_from_worker.send(ConnectionEvent::Data(
+            format!(
+                "\r\n[VNC] Warning: passwords longer than {} chars may fail on VNCAuth servers.\r\n",
+                VNC_AUTH_PASSWORD_LIMIT
+            )
+            .into_bytes(),
+        ));
+    }
+
     let vnc = VncConnector::new(tcp)
         .set_auth_method(async move { Ok::<String, VncError>(auth_password) })
         .set_pixel_format(PixelFormat::rgba())
@@ -116,15 +141,23 @@ async fn run_vnc_worker_inner(
     );
     let _ = tx_from_worker.send(ConnectionEvent::Data(summary.into_bytes()));
 
+    // Force the first full framebuffer so UI starts from a known consistent image.
+    vnc.input(X11Event::FullRefresh)
+        .await
+        .map_err(|e| format!("VNC initial full refresh failed: {}", e))?;
+
     let mut pointer = PointerState::default();
-    let mut refresh = tokio::time::interval(Duration::from_millis(16));
+    let mut remote_lock_state: Option<KeyboardIndicators> = None;
+    let mut refresh = tokio::time::interval(VNC_REFRESH_INTERVAL);
     refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
             input = rx_from_iced.recv() => {
                 match input {
-                    Some(input) => handle_connection_input(&vnc, &mut pointer, input).await?,
+                    Some(input) => {
+                        handle_connection_input(&vnc, &mut pointer, &mut remote_lock_state, input).await?
+                    }
                     None => {
                         info!("[VNC] input channel closed; closing session");
                         break;
@@ -236,6 +269,12 @@ async fn handle_vnc_event(
             // Tight/JPEG is not negotiated in the MVP stage.
         }
         VncEvent::Error(msg) => {
+            if msg.to_ascii_lowercase().contains("password") {
+                return Err(format!("VNC authentication failed: {}", msg));
+            }
+            if msg.to_ascii_lowercase().contains("security") {
+                return Err(format!("VNC security negotiation failed: {}", msg));
+            }
             return Err(format!("VNC engine error: {}", msg));
         }
         _ => {
@@ -249,6 +288,7 @@ async fn handle_vnc_event(
 async fn handle_connection_input(
     vnc: &VncClient,
     pointer: &mut PointerState,
+    remote_lock_state: &mut Option<KeyboardIndicators>,
     input: ConnectionInput,
 ) -> Result<(), String> {
     match input {
@@ -267,12 +307,13 @@ async fn handle_connection_input(
             Ok(())
         }
         ConnectionInput::Resize { cols, rows } => {
-            debug!("[VNC] resize request ignored in MVP: {}x{}", cols, rows);
-            Ok(())
+            debug!("[VNC] resize hint received: {}x{} (requesting full refresh)", cols, rows);
+            vnc.input(X11Event::FullRefresh)
+                .await
+                .map_err(|e| format!("VNC full refresh on resize failed: {}", e))
         }
-        ConnectionInput::SyncKeyboardIndicators(_) => {
-            // RDP-specific in current architecture; VNC path ignores this for now.
-            Ok(())
+        ConnectionInput::SyncKeyboardIndicators(indicators) => {
+            sync_keyboard_indicators(vnc, remote_lock_state, indicators).await
         }
         ConnectionInput::ReleaseAllModifiers => {
             for key in [0xffe1_u32, 0xffe2, 0xffe3, 0xffe4, 0xffe9, 0xffea, 0xffeb, 0xffec] {
@@ -472,4 +513,35 @@ fn keysym_from_scancode(code: u8, extended: bool) -> Option<u32> {
     };
 
     Some(keysym)
+}
+
+async fn sync_keyboard_indicators(
+    vnc: &VncClient,
+    remote_lock_state: &mut Option<KeyboardIndicators>,
+    local: KeyboardIndicators,
+) -> Result<(), String> {
+    // VNC does not provide absolute lock-state sync, only key toggles.
+    // Use a conservative baseline and actively toggle toward local state.
+    let state = remote_lock_state.get_or_insert(KeyboardIndicators::default());
+
+    if state.caps_lock != local.caps_lock {
+        send_lock_toggle(vnc, 0xffe5).await?; // Caps_Lock
+        state.caps_lock = local.caps_lock;
+    }
+    if state.num_lock != local.num_lock {
+        send_lock_toggle(vnc, 0xff7f).await?; // Num_Lock
+        state.num_lock = local.num_lock;
+    }
+    if state.scroll_lock != local.scroll_lock {
+        send_lock_toggle(vnc, 0xff14).await?; // Scroll_Lock
+        state.scroll_lock = local.scroll_lock;
+    }
+
+    Ok(())
+}
+
+async fn send_lock_toggle(vnc: &VncClient, keysym: u32) -> Result<(), String> {
+    debug!("[VNC] lock toggle keysym=0x{:x}", keysym);
+    send_key(vnc, keysym, true).await?;
+    send_key(vnc, keysym, false).await
 }

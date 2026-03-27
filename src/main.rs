@@ -7,6 +7,7 @@ use iced::window;
 use std::collections::HashSet;
 use std::env;
 use std::path::Path;
+use std::sync::OnceLock;
 mod terminal;
 mod connection;
 mod platform;
@@ -54,6 +55,19 @@ pub const D2CODING: iced::Font = iced::Font {
     family: iced::font::Family::Name("D2Coding"),
     ..iced::Font::DEFAULT
 };
+
+static RDP_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
+
+fn rdp_trace_enabled() -> bool {
+    *RDP_TRACE_ENABLED.get_or_init(|| {
+        std::env::var("KTERM_RDP_TRACE")
+            .map(|v| {
+                let v = v.to_ascii_lowercase();
+                v == "1" || v == "true" || v == "yes" || v == "on"
+            })
+            .unwrap_or(false)
+    })
+}
 
 pub fn main() -> iced::Result {
     iced::application(
@@ -399,6 +413,7 @@ pub enum Message {
     SyncRdpKeyboardIndicators,
     ReleaseRdpModifiers,
     WindowSizeChanged(f32, f32),
+    RemoteDisplayRedrawPulse,
 }
 
 // ---------- Update ----------
@@ -469,6 +484,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             let maybe_index = state.sessions.iter().position(|s| s.id == target_id);
             if let Some(target_index) = maybe_index {
                 let session = &mut state.sessions[target_index];
+                let mut schedule_redraw_pulse = false;
                 match event {
                     connection::ConnectionEvent::Connected(sender) => {
                         session.sender = Some(sender.clone());
@@ -483,7 +499,16 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                         }
                     }
                     connection::ConnectionEvent::Data(data) => {
-                        if !data.is_empty() {
+                        if matches!(session.kind, SessionKind::RemoteDisplay) {
+                            if let Some(display) = session.remote_display.as_mut() {
+                                if !data.is_empty() {
+                                    let msg = String::from_utf8_lossy(&data).trim().to_string();
+                                    if !msg.is_empty() {
+                                        display.status_message = Some(msg);
+                                    }
+                                }
+                            }
+                        } else if !data.is_empty() {
                             session.terminal.process_bytes(&data);
                             session.terminal.cache.clear();
                             let responses: Vec<Vec<u8>> = session.terminal.pending_responses.drain(..).collect();
@@ -493,14 +518,59 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                         }
                     }
                     connection::ConnectionEvent::Frames(frames) => {
+                        let frame_batch_len = frames.len();
+                        let mut full_count = 0usize;
+                        let mut rect_count = 0usize;
+                        for f in &frames {
+                            match f {
+                                remote_display::FrameUpdate::Full { .. } => full_count += 1,
+                                remote_display::FrameUpdate::Rect { .. } => rect_count += 1,
+                            }
+                        }
+                        if rdp_trace_enabled() {
+                            eprintln!(
+                                "[RDP-UI] session_id={} frames={} full={} rect={}",
+                                target_id,
+                                frame_batch_len,
+                                full_count,
+                                rect_count,
+                            );
+                        }
+
                         if session.remote_display.is_none() {
                             session.remote_display = Some(RemoteDisplayState::new(1280, 720));
                         }
                         if let Some(display) = session.remote_display.as_mut() {
+                            let frame_seq_before = display.frame_seq;
                             display.status_message = None;
+
+                            // Start a fresh dirty batch for this UI event.
+                            if !display.full_upload {
+                                display.dirty_rects.clear();
+                            }
+
                             for frame in frames {
                                 display.apply(frame);
                             }
+
+                            // RDP bootstrap: if the first meaningful update is rect-only,
+                            // force one full upload so the accumulated CPU buffer is presented.
+                            // Also force full upload for very large rect batches.
+                            if (frame_seq_before == 0 && full_count == 0 && rect_count > 0)
+                                || (full_count == 0 && rect_count > 256)
+                            {
+                                display.full_upload = true;
+                                display.dirty_rects.clear();
+                                if rdp_trace_enabled() {
+                                    eprintln!(
+                                        "[RDP-UI] force_full_upload session_id={} reason=bootstrap_or_large_rect_batch rects={}",
+                                        target_id,
+                                        rect_count,
+                                    );
+                                }
+                            }
+
+                            schedule_redraw_pulse = true;
                             // No flush needed — shader widget reads state directly in view()
                         }
                     }
@@ -515,7 +585,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                     }
                     connection::ConnectionEvent::Error(e) => {
                         session.sender = None;
-                        eprintln!("[RDP Error] {}", e);
+                        eprintln!("[Connection Error] {}", e);
                         if let Some(display) = session.remote_display.as_mut() {
                             display.status_message = Some(format!("Error: {}", e));
                         } else {
@@ -525,9 +595,19 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                         }
                     }
                 }
+
+                if schedule_redraw_pulse {
+                    return Task::perform(
+                        async {
+                            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                        },
+                        |_| Message::RemoteDisplayRedrawPulse,
+                    );
+                }
             }
             Task::none()
         }
+        Message::RemoteDisplayRedrawPulse => Task::none(),
         Message::TerminalResize(new_rows, new_cols) => {
             if let Some(session) = state.sessions.get_mut(state.active_index) {
                 if session.terminal.rows != new_rows || session.terminal.cols != new_cols {
@@ -712,6 +792,9 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             if let Some(session) = state.sessions.get_mut(target_index) {
                 target_id = Some(session.id);
                 *session = Session::new_remote_display(session.id, name, 1280, 720);
+                if let Some(display) = session.remote_display.as_mut() {
+                    display.status_message = Some("Connecting to VNC server...".to_string());
+                }
             }
 
             if let Some(target_id) = target_id {
@@ -1416,8 +1499,10 @@ fn view(state: &State) -> Element<'_, Message> {
                             frame: std::sync::Arc::clone(&display.rgba),
                             tex_width: display.width as u32,
                             tex_height: display.height as u32,
-                            dirty_rects: Vec::new(),
-                            full_upload: true,
+                            dirty_rects: display.dirty_rects.clone(),
+                            full_upload: display.full_upload,
+                            frame_seq: display.frame_seq,
+                            source_id: display.source_id,
                         };
                         container(
                             shader(program)
@@ -1426,6 +1511,10 @@ fn view(state: &State) -> Element<'_, Message> {
                         )
                         .width(Length::Fill)
                         .height(Length::Fill)
+                        .style(|_| container::Style {
+                            background: Some(Background::Color(Color::BLACK)),
+                            ..Default::default()
+                        })
                         .into()
                     } else {
                         container(

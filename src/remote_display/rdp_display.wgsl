@@ -31,8 +31,12 @@ struct Uniforms {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     // Compute aspect-ratio–preserving UV (Contain fit)
-    let vp_aspect = u.viewport.x / u.viewport.y;
-    let tex_aspect = u.tex_size.x / u.tex_size.y;
+    let vp_w = max(u.viewport.x, 1.0);
+    let vp_h = max(u.viewport.y, 1.0);
+    let tex_w = max(u.tex_size.x, 1.0);
+    let tex_h = max(u.tex_size.y, 1.0);
+    let vp_aspect = vp_w / vp_h;
+    let tex_aspect = tex_w / tex_h;
 
     var scale: vec2f;
     if tex_aspect > vp_aspect {
@@ -50,5 +54,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         return vec4f(0.0, 0.0, 0.0, 1.0);
     }
 
-    return textureSample(tex, tex_sampler, centered_uv);
+    // Some remote sources provide undefined/zero alpha in frame pixels.
+    // Force opaque output so the desktop does not bleed through.
+    let sampled = textureSample(tex, tex_sampler, centered_uv);
+    return vec4f(sampled.rgb, 1.0);
 }
