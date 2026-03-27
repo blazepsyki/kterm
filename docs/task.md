@@ -57,9 +57,16 @@
   - [x] Phase B 착수: 연결 안정화(연결 타임아웃/인증 경고/초기 FullRefresh)
   - [x] Phase D 착수: 증분 렌더 경로(frame_seq + dirty_rects 실배선) 적용
   - [x] Phase E 착수: 락키 동기화(Caps/Num/Scroll) 처리 추가
-  - [ ] `src/connection/vnc.rs` 구현
-  - [ ] 공용 `remote_display` 모듈에 VNC 프레임 연결
-  - [ ] VNC 입력 이벤트(키보드/마우스) 연결
+  - [x] `src/connection/vnc.rs` 구현
+  - [x] 공용 `remote_display` 모듈에 VNC 프레임 연결
+  - [x] VNC 입력 이벤트(키보드/마우스/휠) 연결
+  - [x] CursorPseudo 렌더링 연결
+  - [x] Phase D 렌더 튜닝값 고정(streak 6, batch 64, healing 2s)
+  - [x] Phase C 프레임 경로 완료(SetResolution/RawImage/Copy + healing 2s)
+  - [ ] 클립보드 양방향 통합 (시스템 클립보드 연계)
+  - [ ] 동적 해상도 변경(SetDesktopSize) 지원
+  - [ ] 인코딩 확장(Tight/ZRLE) 및 서버별 호환성 검증
+  - [ ] 자동 재연결/복구 UX 및 장애 시나리오 검증
 - [ ] 15단계: UI/UX 고도화 
   - [ ] 마우스 기반 탭 분할(Drag to Split) 및 레이아웃 관리 기능
   - [ ] 탭 순서 변경(Drag & Drop) 기능

@@ -5,10 +5,12 @@ use iced::{Background, Color, Element, Length, Task, Subscription, event, keyboa
 use iced::widget::operation::focus;
 use env_logger::Env;
 use iced::window;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
 use std::collections::HashSet;
 use std::env;
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 mod terminal;
 mod connection;
 mod platform;
@@ -57,7 +59,78 @@ pub const D2CODING: iced::Font = iced::Font {
     ..iced::Font::DEFAULT
 };
 
+// RDP Resolution Presets
+const RDP_RESOLUTION_PRESETS: &[(u16, u16)] = &[
+    (1024, 768),
+    (1280, 720),
+    (1280, 1024),
+    (1366, 768),
+    (1600, 900),
+    (1920, 1080),
+    (2560, 1440),
+];
+
 static RDP_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
+static SESSION_LOG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+static SESSION_LOG_FILE: OnceLock<Arc<Mutex<File>>> = OnceLock::new();
+const VNC_RECT_ONLY_STREAK_FORCE_THRESHOLD: u32 = 6;
+const VNC_RECT_BATCH_FORCE_THRESHOLD: usize = 64;
+
+struct TeeLoggerWriter {
+    file: Arc<Mutex<File>>,
+}
+
+impl Write for TeeLoggerWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Ok(mut f) = self.file.lock() {
+            f.write_all(buf)?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let Ok(mut f) = self.file.lock() {
+            f.flush()?;
+        }
+        Ok(())
+    }
+}
+
+fn session_log_path() -> &'static std::path::Path {
+    SESSION_LOG_PATH
+        .get_or_init(|| {
+            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+            Path::new("logs").join(format!("kterm_{}.log", timestamp))
+        })
+        .as_path()
+}
+
+pub fn runtime_log_path() -> std::path::PathBuf {
+    session_log_path().to_path_buf()
+}
+
+fn init_session_log_file() -> Result<(), String> {
+    let path = session_log_path().to_path_buf();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("cannot create log dir: {}", e))?;
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("cannot open runtime log: {}", e))?;
+
+    writeln!(
+        file,
+        "\n=== kterm run start {} ===",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f")
+    )
+    .map_err(|e| format!("cannot write runtime log header: {}", e))?;
+
+    let _ = SESSION_LOG_FILE.set(Arc::new(Mutex::new(file)));
+    Ok(())
+}
 
 fn rdp_trace_enabled() -> bool {
     *RDP_TRACE_ENABLED.get_or_init(|| {
@@ -71,9 +144,18 @@ fn rdp_trace_enabled() -> bool {
 }
 
 pub fn main() -> iced::Result {
-    let _ = env_logger::Builder::from_env(Env::default().default_filter_or("info"))
-        .format_timestamp_millis()
-        .try_init();
+    let _ = init_session_log_file();
+
+    let mut logger = env_logger::Builder::from_env(Env::default().default_filter_or("info"));
+    logger.format_timestamp_millis();
+    if let Some(file) = SESSION_LOG_FILE.get().cloned() {
+        logger.target(env_logger::Target::Pipe(Box::new(TeeLoggerWriter {
+            file,
+        })));
+    }
+    let _ = logger.try_init();
+
+    log::info!("[LOG] unified session log file: {}", session_log_path().display());
 
     iced::application(
         || {
@@ -191,6 +273,7 @@ struct Session {
     remote_display: Option<RemoteDisplayState>,
     sender: Option<mpsc::UnboundedSender<connection::ConnectionInput>>,
     rdp_secure_attention_active: bool,
+    vnc_rect_only_streak: u32,
 }
 
 impl Session {
@@ -203,6 +286,7 @@ impl Session {
             remote_display: None,
             sender: None,
             rdp_secure_attention_active: false,
+            vnc_rect_only_streak: 0,
         }
     }
 
@@ -215,6 +299,7 @@ impl Session {
             remote_display: None,
             sender: None,
             rdp_secure_attention_active: false,
+            vnc_rect_only_streak: 0,
         }
     }
 
@@ -227,6 +312,7 @@ impl Session {
             remote_display: Some(RemoteDisplayState::new(width, height)),
             sender: None,
             rdp_secure_attention_active: false,
+            vnc_rect_only_streak: 0,
         }
     }
 }
@@ -248,6 +334,7 @@ struct State {
     rdp_port: String,
     rdp_user: String,
     rdp_pass: String,
+    selected_rdp_resolution_index: usize,
     vnc_host: String,
     vnc_port: String,
     vnc_pass: String,
@@ -265,6 +352,7 @@ struct State {
     rdp_id_port: Id,
     rdp_id_user: Id,
     rdp_id_pass: Id,
+    rdp_id_resolution: Id,
     vnc_id_host: Id,
     vnc_id_port: Id,
     vnc_id_pass: Id,
@@ -293,6 +381,7 @@ impl Default for State {
             rdp_port: "3389".to_string(),
             rdp_user: "".to_string(),
             rdp_pass: "".to_string(),
+            selected_rdp_resolution_index: 1,  // Default to 1280x720
             vnc_host: "".to_string(),
             vnc_port: "5900".to_string(),
             vnc_pass: "".to_string(),
@@ -310,6 +399,7 @@ impl Default for State {
             rdp_id_port: Id::new("rdp_port"),
             rdp_id_user: Id::new("rdp_user"),
             rdp_id_pass: Id::new("rdp_pass"),
+            rdp_id_resolution: Id::new("rdp_resolution"),
             vnc_id_host: Id::new("vnc_host"),
             vnc_id_port: Id::new("vnc_port"),
             vnc_id_pass: Id::new("vnc_pass"),
@@ -344,6 +434,7 @@ impl State {
                 self.rdp_id_port.clone(),
                 self.rdp_id_user.clone(),
                 self.rdp_id_pass.clone(),
+                self.rdp_id_resolution.clone(),
             ],
             ProtocolMode::Vnc => vec![
                 self.vnc_id_host.clone(),
@@ -380,6 +471,7 @@ pub enum Message {
     RdpPortChanged(String),
     RdpUserChanged(String),
     RdpPassChanged(String),
+    RdpResolutionSelected(usize),
     VncHostChanged(String),
     VncPortChanged(String),
     VncPassChanged(String),
@@ -521,6 +613,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                         }
                     }
                     connection::ConnectionEvent::Frames(frames) => {
+                        let is_vnc_session = session.name.starts_with("VNC:");
                         let frame_batch_len = frames.len();
                         let mut full_count = 0usize;
                         let mut rect_count = 0usize;
@@ -531,7 +624,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                             }
                         }
                         if rdp_trace_enabled() {
-                            eprintln!(
+                            log::info!(
                                 "[RDP-UI] session_id={} frames={} full={} rect={}",
                                 target_id,
                                 frame_batch_len,
@@ -556,19 +649,52 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                                 display.apply(frame);
                             }
 
+                            if is_vnc_session {
+                                if full_count > 0 {
+                                    session.vnc_rect_only_streak = 0;
+                                } else if rect_count > 0 {
+                                    session.vnc_rect_only_streak = session
+                                        .vnc_rect_only_streak
+                                        .saturating_add(1);
+                                }
+                            }
+
                             // RDP bootstrap: if the first meaningful update is rect-only,
                             // force one full upload so the accumulated CPU buffer is presented.
                             // Also force full upload for very large rect batches.
-                            if (frame_seq_before == 0 && full_count == 0 && rect_count > 0)
-                                || (full_count == 0 && rect_count > 256)
+                            let force_bootstrap = frame_seq_before == 0 && full_count == 0 && rect_count > 0;
+                            let force_large_batch = full_count == 0 && rect_count > 256;
+                            let force_vnc_streak = is_vnc_session
+                                && full_count == 0
+                                && rect_count > 0
+                                && session.vnc_rect_only_streak >= VNC_RECT_ONLY_STREAK_FORCE_THRESHOLD;
+                            let force_vnc_batch = is_vnc_session
+                                && full_count == 0
+                                && rect_count >= VNC_RECT_BATCH_FORCE_THRESHOLD;
+
+                            if force_bootstrap || force_large_batch || force_vnc_streak || force_vnc_batch
                             {
                                 display.full_upload = true;
                                 display.dirty_rects.clear();
+                                if is_vnc_session {
+                                    session.vnc_rect_only_streak = 0;
+                                }
                                 if rdp_trace_enabled() {
-                                    eprintln!(
-                                        "[RDP-UI] force_full_upload session_id={} reason=bootstrap_or_large_rect_batch rects={}",
+                                    let reason = if force_bootstrap {
+                                        "bootstrap"
+                                    } else if force_large_batch {
+                                        "large_rect_batch"
+                                    } else if force_vnc_streak {
+                                        "vnc_rect_only_streak"
+                                    } else {
+                                        "vnc_rect_batch"
+                                    };
+                                    log::info!(
+                                        "[RDP-UI] force_full_upload session_id={} reason={} rects={} vnc_streak={}",
                                         target_id,
+                                        reason,
                                         rect_count,
+                                        session.vnc_rect_only_streak,
                                     );
                                 }
                             }
@@ -588,7 +714,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                     }
                     connection::ConnectionEvent::Error(e) => {
                         session.sender = None;
-                        eprintln!("[Connection Error] {}", e);
+                        log::error!("[Connection Error] {}", e);
                         if let Some(display) = session.remote_display.as_mut() {
                             display.status_message = Some(format!("Error: {}", e));
                         } else {
@@ -646,6 +772,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::RdpPortChanged(s) => { state.rdp_port = s; Task::none() }
         Message::RdpUserChanged(s) => { state.rdp_user = s; Task::none() }
         Message::RdpPassChanged(s) => { state.rdp_pass = s; Task::none() }
+        Message::RdpResolutionSelected(index) => { state.selected_rdp_resolution_index = index; Task::none() }
         Message::VncHostChanged(s) => { state.vnc_host = s; Task::none() }
         Message::VncPortChanged(s) => { state.vnc_port = s; Task::none() }
         Message::VncPassChanged(s) => { state.vnc_pass = s; Task::none() }
@@ -740,13 +867,14 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             let port: u16 = state.rdp_port.parse().unwrap_or(3389);
             let user = state.rdp_user.clone();
             let pass = state.rdp_pass.clone();
+            let (width, height) = RDP_RESOLUTION_PRESETS.get(state.selected_rdp_resolution_index).copied().unwrap_or((1280, 720));
             let name = format!("RDP: {}@{}:{}", user, host, port);
 
             let target_index = state.active_index;
             let mut target_id = None;
             if let Some(session) = state.sessions.get_mut(target_index) {
                 target_id = Some(session.id);
-                *session = Session::new_remote_display(session.id, name, 1280, 720);
+                *session = Session::new_remote_display(session.id, name, width, height);
             }
 
             if let Some(target_id) = target_id {
@@ -776,7 +904,7 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
                 // ─────────────────────────────────────────────────────────────
 
                 Task::run(
-                    connection::rdp::connect_and_subscribe(host, port, user, pass, cliprdr_factory, clipboard_rx_opt),
+                    connection::rdp::connect_and_subscribe(host, port, user, pass, width, height, cliprdr_factory, clipboard_rx_opt),
                     move |event| Message::ConnectionMessage(target_id, event),
                 )
             } else {
@@ -1433,6 +1561,14 @@ fn view(state: &State) -> Element<'_, Message> {
                         row![text("Port: ").width(100), text_input("3389", &state.rdp_port).id(state.rdp_id_port.clone()).on_input(Message::RdpPortChanged).width(150)],
                         row![text("Username: ").width(100), text_input("user", &state.rdp_user).id(state.rdp_id_user.clone()).on_input(Message::RdpUserChanged).width(300)],
                         row![text("Password: ").width(100), text_input("pass", &state.rdp_pass).id(state.rdp_id_pass.clone()).on_input(Message::RdpPassChanged).secure(true).width(300).on_submit(Message::ConnectRdp)],
+                        {
+                            let resolution_labels: Vec<String> = RDP_RESOLUTION_PRESETS.iter().map(|(w, h)| format!("{}x{}", w, h)).collect();
+                            let selected_label = Some(format!("{}x{}", RDP_RESOLUTION_PRESETS[state.selected_rdp_resolution_index].0, RDP_RESOLUTION_PRESETS[state.selected_rdp_resolution_index].1));
+                            let pick = pick_list(resolution_labels, selected_label, |selected| {
+                                RDP_RESOLUTION_PRESETS.iter().position(|(w, h)| format!("{}x{}", w, h) == selected).map(Message::RdpResolutionSelected).unwrap_or(Message::RdpResolutionSelected(1))
+                            }).width(150);
+                            row![text("Resolution: ").width(100), container(pick).id(state.rdp_id_resolution.clone()).width(150)]
+                        },
                         Space::new().height(Length::Fixed(10.0)),
                         button(container(text("Connect")).center_x(Length::Fill).center_y(Length::Fill)).padding(12).width(Length::Fill).style(button::primary).on_press(Message::ConnectRdp)
                     ].spacing(15).into(),

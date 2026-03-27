@@ -3721,6 +3721,7 @@ dependencies = [
  "async-trait",
  "bytemuck",
  "bytes",
+ "chrono",
  "env_logger",
  "futures",
  "iced",

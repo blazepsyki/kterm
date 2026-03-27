@@ -6,7 +6,7 @@ use std::io::Write as _;
 use std::time::Duration;
 
 use iced::futures::{self, StreamExt};
-use log::warn;
+use log::{info, warn};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 
@@ -59,6 +59,8 @@ pub fn connect_and_subscribe(
     port: u16,
     username: String,
     password: String,
+    width: u16,
+    height: u16,
     cliprdr_factory: Option<Box<dyn CliprdrBackendFactory + Send>>,
     clipboard_rx: Option<mpsc::UnboundedReceiver<ClipboardMessage>>,
 ) -> futures::stream::BoxStream<'static, ConnectionEvent> {
@@ -66,7 +68,7 @@ pub fn connect_and_subscribe(
     let (tx_from_worker, rx_from_worker) = mpsc::unbounded_channel::<ConnectionEvent>();
 
     tokio::spawn(async move {
-        run_rdp_worker(host, port, username, password, rx_from_iced, tx_from_worker, tx_to_rdp, cliprdr_factory, clipboard_rx).await;
+        run_rdp_worker(host, port, username, password, width, height, rx_from_iced, tx_from_worker, tx_to_rdp, cliprdr_factory, clipboard_rx).await;
     });
 
     // Batch consecutive Frames events to reduce Handle rebuilds on the UI side.
@@ -113,6 +115,8 @@ async fn run_rdp_worker(
     port: u16,
     username: String,
     password: String,
+    width: u16,
+    height: u16,
     rx_from_iced: mpsc::UnboundedReceiver<ConnectionInput>,
     tx_from_worker: mpsc::UnboundedSender<ConnectionEvent>,
     tx_to_rdp: mpsc::UnboundedSender<ConnectionInput>,
@@ -120,7 +124,7 @@ async fn run_rdp_worker(
     clipboard_rx: Option<mpsc::UnboundedReceiver<ClipboardMessage>>,
 ) {
     let tx_err = tx_from_worker.clone();
-    if let Err(err) = run_rdp_worker_inner(host, port, username, password, rx_from_iced, tx_from_worker, tx_to_rdp, cliprdr_factory, clipboard_rx).await {
+    if let Err(err) = run_rdp_worker_inner(host, port, username, password, width, height, rx_from_iced, tx_from_worker, tx_to_rdp, cliprdr_factory, clipboard_rx).await {
         let _ = tx_err.send(ConnectionEvent::Error(err));
     }
 }
@@ -130,6 +134,8 @@ async fn run_rdp_worker_inner(
     port: u16,
     username: String,
     password: String,
+    width: u16,
+    height: u16,
     mut rx_from_iced: mpsc::UnboundedReceiver<ConnectionInput>,
     tx_from_worker: mpsc::UnboundedSender<ConnectionEvent>,
     tx_to_rdp: mpsc::UnboundedSender<ConnectionInput>,
@@ -139,14 +145,14 @@ async fn run_rdp_worker_inner(
     // --- PDU trace log -------------------------------------------------------
     // Log handshake sequencing plus every runtime Action so protocol behavior
     // can be inspected end-to-end.
-    let pdu_log_path = "rdp_pdu_trace.log";
+    let pdu_log_path = crate::runtime_log_path();
     let mut pdu_log = OpenOptions::new()
-        .create(true).append(true).open(pdu_log_path)
+        .create(true).append(true).open(&pdu_log_path)
         .map_err(|e| format!("cannot open PDU log: {}", e))?;
     writeln!(pdu_log, "\n=== RDP session start  host={host} ===")
         .map_err(|e| format!("pdu_log write: {}", e))?;
 
-    let config = build_config(username, password, None);
+    let config = build_config(username, password, None, width, height);
     let (gfx_frame_tx, mut gfx_frame_rx) = mpsc::unbounded_channel::<Vec<crate::remote_display::FrameUpdate>>();
     let (connection_result, mut framed) = connect(config, host.clone(), port, gfx_frame_tx, cliprdr_factory).await?;
 
@@ -307,7 +313,7 @@ async fn run_rdp_worker_inner(
                                 let _ = tx_from_worker.send(ConnectionEvent::Frames(frame_updates));
                             }
                         } else {
-                            eprintln!("[RDP] unhandled PDU #{}: {:?} ({})", processed_pdus, action, e);
+                            warn!("[RDP] unhandled PDU #{}: {:?} ({})", processed_pdus, action, e);
                         }
                         continue;
                     }
@@ -356,7 +362,7 @@ async fn run_rdp_worker_inner(
                             }
                             // Session reactivated (e.g. login → desktop transition
                             // on servers that send DeactivateAll, such as Windows RDS).
-                            eprintln!("[RDP] session reactivated");
+                            info!("[RDP] session reactivated");
                             if let Some(ind) = last_indicators {
                                 sync_keyboard_indicators(
                                     &mut framed, &mut active_stage, &mut image,
@@ -392,7 +398,7 @@ async fn sync_keyboard_indicators(
     indicators: KeyboardIndicators,
     reason: &str,
 ) {
-    eprintln!(
+    info!(
         "[RDP] sync_keyboard_indicators [{}]: NumLock={} CapsLock={} ScrollLock={}",
         reason, indicators.num_lock, indicators.caps_lock, indicators.scroll_lock,
     );
@@ -947,7 +953,7 @@ impl DvcProcessor for GfxProcessor {
     }
 
     fn start(&mut self, _channel_id: u32) -> dvc_pdu::PduResult<Vec<DvcMessage>> {
-        eprintln!("[GFX] channel opened, advertising capabilities V8..V10_7");
+        info!("[GFX] channel opened, advertising capabilities V8..V10_7");
         let caps = ClientPdu::CapabilitiesAdvertise(CapabilitiesAdvertisePdu(vec![
             CapabilitySet::V8    { flags: CapabilitiesV8Flags::empty() },
             CapabilitySet::V8_1  { flags: CapabilitiesV81Flags::empty() },
@@ -966,14 +972,14 @@ impl DvcProcessor for GfxProcessor {
     fn process(&mut self, _channel_id: u32, payload: &[u8]) -> dvc_pdu::PduResult<Vec<DvcMessage>> {
         let mut decompressed = Vec::new();
         if let Err(e) = self.decompressor.decompress(payload, &mut decompressed) {
-            eprintln!("[GFX] ZGFX decompress error: {:?}", e);
+            warn!("[GFX] ZGFX decompress error: {:?}", e);
             return Ok(vec![]);
         }
 
         let pdu = match ironrdp_core::decode::<ServerPdu>(&decompressed) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("[GFX] ServerPdu decode error: {:?}", e);
+                warn!("[GFX] ServerPdu decode error: {:?}", e);
                 return Ok(vec![]);
             }
         };
@@ -982,7 +988,7 @@ impl DvcProcessor for GfxProcessor {
 
         match pdu {
             ServerPdu::CapabilitiesConfirm(confirm) => {
-                eprintln!("[GFX] capabilities confirmed: {:?}", confirm);
+                info!("[GFX] capabilities confirmed: {:?}", confirm);
             }
             ServerPdu::CreateSurface(create) => {
                 self.surfaces.insert(create.surface_id, GfxSurface {
@@ -1001,7 +1007,7 @@ impl DvcProcessor for GfxProcessor {
             }
             ServerPdu::ResetGraphics(reset) => {
                 self.surfaces.clear();
-                eprintln!("[GFX] ResetGraphics: {}x{}", reset.width, reset.height);
+                info!("[GFX] ResetGraphics: {}x{}", reset.width, reset.height);
             }
             ServerPdu::StartFrame(_) => {}
             ServerPdu::EndFrame(end) => {
@@ -1036,12 +1042,12 @@ impl DvcProcessor for GfxProcessor {
                         ]);
                     }
                     other => {
-                        eprintln!("[GFX] WireToSurface1: unsupported codec {:?} — Phase 9-B-2/C", other);
+                        warn!("[GFX] WireToSurface1: unsupported codec {:?} - Phase 9-B-2/C", other);
                     }
                 }
             }
             ServerPdu::WireToSurface2(w2s2) => {
-                eprintln!("[GFX] WireToSurface2: unsupported codec {:?} — Phase 9-B-2/C", w2s2.codec_id);
+                warn!("[GFX] WireToSurface2: unsupported codec {:?} - Phase 9-B-2/C", w2s2.codec_id);
             }
             _ => {}
         }
@@ -1050,7 +1056,7 @@ impl DvcProcessor for GfxProcessor {
     }
 
     fn close(&mut self, _channel_id: u32) {
-        eprintln!("[GFX] channel closed");
+        info!("[GFX] channel closed");
     }
 }
 
@@ -1139,7 +1145,7 @@ async fn connect(
     Ok((connection_result, upgraded_framed))
 }
 
-fn build_config(username: String, password: String, domain: Option<String>) -> connector::Config {
+fn build_config(username: String, password: String, domain: Option<String>, width: u16, height: u16) -> connector::Config {
     connector::Config {
         credentials: Credentials::UsernamePassword { username, password },
         domain,
@@ -1152,8 +1158,8 @@ fn build_config(username: String, password: String, domain: Option<String>) -> c
         ime_file_name: String::new(),
         dig_product_id: String::new(),
         desktop_size: connector::DesktopSize {
-            width: 1280,
-            height: 720,
+            width,
+            height,
         },
         bitmap: Some(BitmapConfig {
             lossy_compression: false,

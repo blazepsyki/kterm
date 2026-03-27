@@ -19,6 +19,62 @@ use crate::remote_display::FrameUpdate;
 const VNC_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const VNC_REFRESH_INTERVAL: Duration = Duration::from_millis(16);
 const VNC_AUTH_PASSWORD_LIMIT: usize = 8;
+const VNC_CONSERVATIVE_FULL_UPLOAD: bool = false;
+const VNC_HEAL_FULL_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Default)]
+struct VncFramebuffer {
+    width: u16,
+    height: u16,
+    rgba: Vec<u8>,
+}
+
+impl VncFramebuffer {
+    fn reset(&mut self, width: u16, height: u16) {
+        self.width = width;
+        self.height = height;
+        self.rgba = vec![0; width as usize * height as usize * 4];
+    }
+
+    fn as_full_update(&self) -> Option<FrameUpdate> {
+        if self.width == 0 || self.height == 0 {
+            return None;
+        }
+
+        Some(FrameUpdate::Full {
+            width: self.width,
+            height: self.height,
+            rgba: self.rgba.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CursorRect {
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+}
+
+#[derive(Debug, Default)]
+struct VncCursorState {
+    hot_x: u16,
+    hot_y: u16,
+    width: u16,
+    height: u16,
+    rgba: Vec<u8>,
+    last_rect: Option<CursorRect>,
+    needs_cursor_sync_full_refresh: bool,
+}
+
+impl VncCursorState {
+    fn has_shape(&self) -> bool {
+        self.width > 0
+            && self.height > 0
+            && self.rgba.len() >= self.width as usize * self.height as usize * 4
+    }
+}
 
 pub fn connect_and_subscribe(
     host: String,
@@ -123,8 +179,10 @@ async fn run_vnc_worker_inner(
         .set_auth_method(async move { Ok::<String, VncError>(auth_password) })
         .set_pixel_format(PixelFormat::rgba())
         .allow_shared(true)
+        .add_encoding(VncEncoding::CopyRect)
         .add_encoding(VncEncoding::Raw)
         .add_encoding(VncEncoding::DesktopSizePseudo)
+        .add_encoding(VncEncoding::CursorPseudo)
         .build()
         .map_err(|e| format!("VNC connector build failed: {}", e))?
         .try_start()
@@ -136,7 +194,7 @@ async fn run_vnc_worker_inner(
     let _ = tx_from_worker.send(ConnectionEvent::Connected(tx_to_vnc));
 
     let summary = format!(
-        "\r\n[VNC] Connected: {}:{} (encodings: Raw, DesktopSize)\r\n",
+        "\r\n[VNC] Connected: {}:{} (encodings: CopyRect, Raw, DesktopSize, CursorPseudo)\r\n",
         host, port
     );
     let _ = tx_from_worker.send(ConnectionEvent::Data(summary.into_bytes()));
@@ -147,9 +205,12 @@ async fn run_vnc_worker_inner(
         .map_err(|e| format!("VNC initial full refresh failed: {}", e))?;
 
     let mut pointer = PointerState::default();
+    let mut framebuffer = VncFramebuffer::default();
+    let mut cursor = VncCursorState::default();
     let mut remote_lock_state: Option<KeyboardIndicators> = None;
     let mut key_state = VncKeyState::default();
     let mut refresh = tokio::time::interval(VNC_REFRESH_INTERVAL);
+    let mut last_full_refresh = tokio::time::Instant::now();
     refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
@@ -159,6 +220,9 @@ async fn run_vnc_worker_inner(
                     Some(input) => {
                         handle_connection_input(
                             &vnc,
+                            &tx_from_worker,
+                            &framebuffer,
+                            &mut cursor,
                             &mut pointer,
                             &mut remote_lock_state,
                             &mut key_state,
@@ -173,17 +237,38 @@ async fn run_vnc_worker_inner(
                 }
             }
             _ = refresh.tick() => {
-                vnc.input(X11Event::Refresh)
+                let use_full_refresh = last_full_refresh.elapsed() >= VNC_HEAL_FULL_REFRESH_INTERVAL;
+                let req = if use_full_refresh {
+                    X11Event::FullRefresh
+                } else {
+                    X11Event::Refresh
+                };
+
+                vnc.input(req)
                     .await
                     .map_err(|e| format!("VNC refresh request failed: {}", e))?;
+
+                if use_full_refresh {
+                    last_full_refresh = tokio::time::Instant::now();
+                }
 
                 loop {
                     match vnc.poll_event().await {
                         Ok(Some(event)) => {
-                            if handle_vnc_event(&tx_from_worker, event).await? {
-                                let _ = vnc.close().await;
-                                let _ = tx_from_worker.send(ConnectionEvent::Disconnected);
-                                return Ok(());
+                            let refresh_request = handle_vnc_event(
+                                &tx_from_worker,
+                                &mut framebuffer,
+                                &mut cursor,
+                                &pointer,
+                                event,
+                            )
+                            .await?;
+
+                            if refresh_request {
+                                vnc.input(X11Event::FullRefresh)
+                                    .await
+                                    .map_err(|e| format!("VNC cursor sync full refresh failed: {}", e))?;
+                                last_full_refresh = tokio::time::Instant::now();
                             }
                         }
                         Ok(None) => break,
@@ -236,10 +321,17 @@ impl VncKeyState {
 
 async fn handle_vnc_event(
     tx_from_worker: &mpsc::UnboundedSender<ConnectionEvent>,
+    framebuffer: &mut VncFramebuffer,
+    cursor: &mut VncCursorState,
+    pointer: &PointerState,
     event: VncEvent,
 ) -> Result<bool, String> {
     match event {
         VncEvent::SetResolution(screen) => {
+            framebuffer.reset(screen.width, screen.height);
+            cursor.last_rect = None;
+            cursor.needs_cursor_sync_full_refresh = true;
+
             let rgba = vec![0; screen.width as usize * screen.height as usize * 4];
             let update = FrameUpdate::Full {
                 width: screen.width,
@@ -248,6 +340,7 @@ async fn handle_vnc_event(
             };
             let _ = tx_from_worker.send(ConnectionEvent::Frames(vec![update]));
             debug!("[VNC] resolution {}x{}", screen.width, screen.height);
+            return Ok(false);
         }
         VncEvent::RawImage(rect, data) => {
             let expected = rect.width as usize * rect.height as usize * 4;
@@ -266,14 +359,29 @@ async fn handle_vnc_event(
                 data[..expected].to_vec()
             };
 
-            let update = FrameUpdate::Rect {
-                x: rect.x,
-                y: rect.y,
-                width: rect.width,
-                height: rect.height,
-                rgba,
+            write_raw_rect_to_framebuffer(framebuffer, rect.x, rect.y, rect.width, rect.height, &rgba);
+
+            let mut updates = if VNC_CONSERVATIVE_FULL_UPLOAD {
+                framebuffer
+                    .as_full_update()
+                    .map(|f| vec![f])
+                    .unwrap_or_else(Vec::new)
+            } else {
+                vec![FrameUpdate::Rect {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: rect.height,
+                    rgba,
+                }]
             };
-            let _ = tx_from_worker.send(ConnectionEvent::Frames(vec![update]));
+
+            if let Some(overlay) = draw_cursor_overlay_update(framebuffer, cursor, pointer) {
+                updates.push(overlay);
+            }
+
+            let _ = tx_from_worker.send(ConnectionEvent::Frames(updates));
+            return Ok(false);
         }
         VncEvent::SetPixelFormat(format) => {
             info!(
@@ -284,23 +392,77 @@ async fn handle_vnc_event(
                 format.green_shift,
                 format.blue_shift
             );
+            return Ok(false);
         }
         VncEvent::Text(text) => {
             let _ = tx_from_worker.send(ConnectionEvent::Data(
                 format!("\r\n[VNC] Clipboard text from server: {}\r\n", text).into_bytes(),
             ));
+            return Ok(false);
         }
         VncEvent::Bell => {
             info!("[VNC] bell");
+            return Ok(false);
         }
-        VncEvent::SetCursor(_, _) => {
-            // CursorPseudo integration will be handled in a later phase.
+        VncEvent::SetCursor(rect, image) => {
+            cursor.hot_x = rect.x;
+            cursor.hot_y = rect.y;
+            cursor.width = rect.width;
+            cursor.height = rect.height;
+            cursor.rgba = image;
+
+            let request_sync_refresh = cursor.needs_cursor_sync_full_refresh;
+            cursor.needs_cursor_sync_full_refresh = false;
+
+            let previous = cursor.last_rect;
+            let next = compute_cursor_rect(framebuffer, cursor, pointer);
+
+            let mut updates = Vec::new();
+            if previous != next {
+                if let Some(old) = previous {
+                    if let Some(restore) = framebuffer_rect_update(framebuffer, old) {
+                        updates.push(restore);
+                    }
+                }
+            }
+
+            if let Some(overlay) = draw_cursor_overlay_update(framebuffer, cursor, pointer) {
+                updates.push(overlay);
+            }
+
+            if !updates.is_empty() {
+                let _ = tx_from_worker.send(ConnectionEvent::Frames(updates));
+            }
+            return Ok(request_sync_refresh);
         }
-        VncEvent::Copy(_, _) => {
-            // CopyRect is not negotiated in the MVP stage.
+        VncEvent::Copy(dst, src) => {
+            if let Some(copied) = copy_rect_in_framebuffer(
+                framebuffer,
+                dst.x,
+                dst.y,
+                src.x,
+                src.y,
+                dst.width.min(src.width),
+                dst.height.min(src.height),
+            ) {
+                let mut updates = if VNC_CONSERVATIVE_FULL_UPLOAD {
+                    framebuffer
+                        .as_full_update()
+                        .map(|f| vec![f])
+                        .unwrap_or_else(Vec::new)
+                } else {
+                    vec![copied]
+                };
+                if let Some(overlay) = draw_cursor_overlay_update(framebuffer, cursor, pointer) {
+                    updates.push(overlay);
+                }
+                let _ = tx_from_worker.send(ConnectionEvent::Frames(updates));
+            }
+            return Ok(false);
         }
         VncEvent::JpegImage(_, _) => {
             // Tight/JPEG is not negotiated in the MVP stage.
+            return Ok(false);
         }
         VncEvent::Error(msg) => {
             if msg.to_ascii_lowercase().contains("password") {
@@ -313,14 +475,16 @@ async fn handle_vnc_event(
         }
         _ => {
             // vnc-rs marks VncEvent as non-exhaustive; ignore future events safely.
+            return Ok(false);
         }
     }
-
-    Ok(false)
 }
 
 async fn handle_connection_input(
     vnc: &VncClient,
+    tx_from_worker: &mpsc::UnboundedSender<ConnectionEvent>,
+    framebuffer: &VncFramebuffer,
+    cursor: &mut VncCursorState,
     pointer: &mut PointerState,
     remote_lock_state: &mut Option<KeyboardIndicators>,
     key_state: &mut VncKeyState,
@@ -328,7 +492,8 @@ async fn handle_connection_input(
 ) -> Result<(), String> {
     match input {
         ConnectionInput::RemoteInput(remote) => {
-            handle_remote_input(vnc, pointer, key_state, remote).await
+            handle_remote_input(vnc, tx_from_worker, framebuffer, cursor, pointer, key_state, remote)
+                .await
         }
         ConnectionInput::Data(bytes) => {
             // Paste path: send UTF-8 text as keysyms.
@@ -370,6 +535,9 @@ async fn handle_connection_input(
 
 async fn handle_remote_input(
     vnc: &VncClient,
+    tx_from_worker: &mpsc::UnboundedSender<ConnectionEvent>,
+    framebuffer: &VncFramebuffer,
+    cursor: &mut VncCursorState,
     pointer: &mut PointerState,
     key_state: &mut VncKeyState,
     remote: RemoteInput,
@@ -413,7 +581,27 @@ async fn handle_remote_input(
         RemoteInput::MouseMove { x, y } => {
             pointer.x = x;
             pointer.y = y;
-            send_pointer(vnc, pointer.x, pointer.y, pointer.buttons).await
+            send_pointer(vnc, pointer.x, pointer.y, pointer.buttons).await?;
+
+            let previous = cursor.last_rect;
+            let next = compute_cursor_rect(framebuffer, cursor, pointer);
+            if previous == next {
+                return Ok(());
+            }
+
+            let mut updates = Vec::new();
+            if let Some(old) = previous {
+                if let Some(restore) = framebuffer_rect_update(framebuffer, old) {
+                    updates.push(restore);
+                }
+            }
+            if let Some(overlay) = draw_cursor_overlay_update(framebuffer, cursor, pointer) {
+                updates.push(overlay);
+            }
+            if !updates.is_empty() {
+                let _ = tx_from_worker.send(ConnectionEvent::Frames(updates));
+            }
+            Ok(())
         }
         RemoteInput::MouseButton { button, down } => {
             let mask = match button {
@@ -720,4 +908,220 @@ fn is_modifier_scancode(code: u8, extended: bool) -> bool {
             | (0x5B, true)
             | (0x5C, true)
     )
+}
+
+fn write_raw_rect_to_framebuffer(
+    framebuffer: &mut VncFramebuffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    rgba: &[u8],
+) {
+    if framebuffer.width == 0 || framebuffer.height == 0 {
+        return;
+    }
+
+    let max_w = framebuffer.width.saturating_sub(x);
+    let max_h = framebuffer.height.saturating_sub(y);
+    let rect_w = width.min(max_w);
+    let rect_h = height.min(max_h);
+    if rect_w == 0 || rect_h == 0 {
+        return;
+    }
+
+    let dst_stride = framebuffer.width as usize * 4;
+    let row_bytes = rect_w as usize * 4;
+    let expected = row_bytes * rect_h as usize;
+    if rgba.len() < expected {
+        return;
+    }
+
+    for row in 0..rect_h as usize {
+        let src_start = row * row_bytes;
+        let src_end = src_start + row_bytes;
+
+        let dst_y = y as usize + row;
+        let dst_start = dst_y * dst_stride + x as usize * 4;
+        let dst_end = dst_start + row_bytes;
+
+        if dst_end <= framebuffer.rgba.len() {
+            framebuffer.rgba[dst_start..dst_end].copy_from_slice(&rgba[src_start..src_end]);
+        }
+    }
+}
+
+fn framebuffer_rect_update(framebuffer: &VncFramebuffer, rect: CursorRect) -> Option<FrameUpdate> {
+    let len = rect.width as usize * rect.height as usize * 4;
+    let mut out = Vec::with_capacity(len);
+    let stride = framebuffer.width as usize * 4;
+    let row_bytes = rect.width as usize * 4;
+
+    for row in 0..rect.height as usize {
+        let src_y = rect.y as usize + row;
+        let src_start = src_y * stride + rect.x as usize * 4;
+        let src_end = src_start + row_bytes;
+        if src_end > framebuffer.rgba.len() {
+            return None;
+        }
+        out.extend_from_slice(&framebuffer.rgba[src_start..src_end]);
+    }
+
+    Some(FrameUpdate::Rect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        rgba: out,
+    })
+}
+
+fn compute_cursor_rect(
+    framebuffer: &VncFramebuffer,
+    cursor: &VncCursorState,
+    pointer: &PointerState,
+) -> Option<CursorRect> {
+    if framebuffer.width == 0 || framebuffer.height == 0 || !cursor.has_shape() {
+        return None;
+    }
+
+    let origin_x = pointer.x as i32 - cursor.hot_x as i32;
+    let origin_y = pointer.y as i32 - cursor.hot_y as i32;
+    let end_x = origin_x + cursor.width as i32;
+    let end_y = origin_y + cursor.height as i32;
+
+    let clipped_x0 = origin_x.clamp(0, framebuffer.width as i32);
+    let clipped_y0 = origin_y.clamp(0, framebuffer.height as i32);
+    let clipped_x1 = end_x.clamp(0, framebuffer.width as i32);
+    let clipped_y1 = end_y.clamp(0, framebuffer.height as i32);
+
+    if clipped_x1 <= clipped_x0 || clipped_y1 <= clipped_y0 {
+        return None;
+    }
+
+    Some(CursorRect {
+        x: clipped_x0 as u16,
+        y: clipped_y0 as u16,
+        width: (clipped_x1 - clipped_x0) as u16,
+        height: (clipped_y1 - clipped_y0) as u16,
+    })
+}
+
+fn draw_cursor_overlay_update(
+    framebuffer: &VncFramebuffer,
+    cursor: &mut VncCursorState,
+    pointer: &PointerState,
+) -> Option<FrameUpdate> {
+    let rect = compute_cursor_rect(framebuffer, cursor, pointer)?;
+
+    let origin_x = pointer.x as i32 - cursor.hot_x as i32;
+    let origin_y = pointer.y as i32 - cursor.hot_y as i32;
+    let src_x0 = (rect.x as i32 - origin_x) as usize;
+    let src_y0 = (rect.y as i32 - origin_y) as usize;
+
+    let mut out = vec![0; rect.width as usize * rect.height as usize * 4];
+    let fb_stride = framebuffer.width as usize * 4;
+    let cursor_stride = cursor.width as usize * 4;
+
+    for row in 0..rect.height as usize {
+        for col in 0..rect.width as usize {
+            let fb_x = rect.x as usize + col;
+            let fb_y = rect.y as usize + row;
+            let bg_idx = fb_y * fb_stride + fb_x * 4;
+
+            let cx = src_x0 + col;
+            let cy = src_y0 + row;
+            let cur_idx = cy * cursor_stride + cx * 4;
+
+            if bg_idx + 3 >= framebuffer.rgba.len() || cur_idx + 3 >= cursor.rgba.len() {
+                continue;
+            }
+
+            let src_r = cursor.rgba[cur_idx] as f32;
+            let src_g = cursor.rgba[cur_idx + 1] as f32;
+            let src_b = cursor.rgba[cur_idx + 2] as f32;
+            let src_a = cursor.rgba[cur_idx + 3] as f32 / 255.0;
+
+            let dst_r = framebuffer.rgba[bg_idx] as f32;
+            let dst_g = framebuffer.rgba[bg_idx + 1] as f32;
+            let dst_b = framebuffer.rgba[bg_idx + 2] as f32;
+
+            let out_idx = (row * rect.width as usize + col) * 4;
+            out[out_idx] = (src_r * src_a + dst_r * (1.0 - src_a)).round() as u8;
+            out[out_idx + 1] = (src_g * src_a + dst_g * (1.0 - src_a)).round() as u8;
+            out[out_idx + 2] = (src_b * src_a + dst_b * (1.0 - src_a)).round() as u8;
+            out[out_idx + 3] = 255;
+        }
+    }
+
+    cursor.last_rect = Some(rect);
+
+    Some(FrameUpdate::Rect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        rgba: out,
+    })
+}
+
+fn copy_rect_in_framebuffer(
+    framebuffer: &mut VncFramebuffer,
+    dst_x: u16,
+    dst_y: u16,
+    src_x: u16,
+    src_y: u16,
+    width: u16,
+    height: u16,
+) -> Option<FrameUpdate> {
+    if framebuffer.width == 0 || framebuffer.height == 0 {
+        return None;
+    }
+
+    let copy_w = width
+        .min(framebuffer.width.saturating_sub(src_x))
+        .min(framebuffer.width.saturating_sub(dst_x));
+    let copy_h = height
+        .min(framebuffer.height.saturating_sub(src_y))
+        .min(framebuffer.height.saturating_sub(dst_y));
+
+    if copy_w == 0 || copy_h == 0 {
+        return None;
+    }
+
+    let fb_stride = framebuffer.width as usize * 4;
+    let row_bytes = copy_w as usize * 4;
+    let mut temp = vec![0u8; row_bytes * copy_h as usize];
+
+    for row in 0..copy_h as usize {
+        let src_start = (src_y as usize + row) * fb_stride + src_x as usize * 4;
+        let src_end = src_start + row_bytes;
+        if src_end > framebuffer.rgba.len() {
+            return None;
+        }
+
+        let tmp_start = row * row_bytes;
+        let tmp_end = tmp_start + row_bytes;
+        temp[tmp_start..tmp_end].copy_from_slice(&framebuffer.rgba[src_start..src_end]);
+    }
+
+    for row in 0..copy_h as usize {
+        let dst_start = (dst_y as usize + row) * fb_stride + dst_x as usize * 4;
+        let dst_end = dst_start + row_bytes;
+        if dst_end > framebuffer.rgba.len() {
+            return None;
+        }
+
+        let tmp_start = row * row_bytes;
+        let tmp_end = tmp_start + row_bytes;
+        framebuffer.rgba[dst_start..dst_end].copy_from_slice(&temp[tmp_start..tmp_end]);
+    }
+
+    Some(FrameUpdate::Rect {
+        x: dst_x,
+        y: dst_y,
+        width: copy_w,
+        height: copy_h,
+        rgba: temp,
+    })
 }
