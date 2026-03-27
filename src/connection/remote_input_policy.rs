@@ -239,6 +239,8 @@ fn map_physical_key_to_scancode(physical_key: &keyboard::key::Physical) -> Optio
         Code::Backspace => Some((0x0E, false)),
         Code::Tab => Some((0x0F, false)),
         Code::Escape => Some((0x01, false)),
+        Code::PrintScreen => Some((0x37, true)),
+        Code::Pause => Some((0x45, true)),
         Code::ArrowUp => Some((0x48, true)),
         Code::ArrowDown => Some((0x50, true)),
         Code::ArrowLeft => Some((0x4B, true)),
@@ -261,6 +263,13 @@ fn map_physical_key_to_scancode(physical_key: &keyboard::key::Physical) -> Optio
         Code::F10 => Some((0x44, false)),
         Code::F11 => Some((0x57, false)),
         Code::F12 => Some((0x58, false)),
+        Code::AudioVolumeMute => Some((0x20, true)),
+        Code::AudioVolumeDown => Some((0x2E, true)),
+        Code::AudioVolumeUp => Some((0x30, true)),
+        Code::MediaTrackPrevious => Some((0x10, true)),
+        Code::MediaTrackNext => Some((0x19, true)),
+        Code::MediaPlayPause => Some((0x22, true)),
+        Code::MediaStop => Some((0x24, true)),
         _ => None,
     }
 }
@@ -273,6 +282,15 @@ fn map_named_key_to_scancode(key: &keyboard::Key) -> Option<(u8, bool)> {
         keyboard::Key::Named(Named::Control) => Some((0x1D, false)),
         keyboard::Key::Named(Named::Alt) => Some((0x38, false)),
         keyboard::Key::Named(Named::Super) => Some((0x5B, true)),
+        keyboard::Key::Named(Named::PrintScreen) => Some((0x37, true)),
+        keyboard::Key::Named(Named::Pause) => Some((0x45, true)),
+        keyboard::Key::Named(Named::AudioVolumeMute) => Some((0x20, true)),
+        keyboard::Key::Named(Named::AudioVolumeDown) => Some((0x2E, true)),
+        keyboard::Key::Named(Named::AudioVolumeUp) => Some((0x30, true)),
+        keyboard::Key::Named(Named::MediaTrackPrevious) => Some((0x10, true)),
+        keyboard::Key::Named(Named::MediaTrackNext) => Some((0x19, true)),
+        keyboard::Key::Named(Named::MediaPlayPause) => Some((0x22, true)),
+        keyboard::Key::Named(Named::MediaStop) => Some((0x24, true)),
         _ => None,
     }
 }

@@ -227,7 +227,7 @@ impl VncKeyState {
             (0x2A, false) => self.shift_left = down,
             (0x36, false) => self.shift_right = down,
             (0x3A, _) if down => self.caps_lock = !self.caps_lock,
-            (0x45, _) if down => self.num_lock = !self.num_lock,
+            (0x45, false) if down => self.num_lock = !self.num_lock,
             (0x46, _) if down => self.scroll_lock = !self.scroll_lock,
             _ => {}
         }
@@ -382,7 +382,7 @@ async fn handle_remote_input(
         } => {
             key_state.update_from_scancode(code, extended, down);
 
-            if is_lock_scancode(code) {
+            if is_lock_scancode(code, extended) {
                 info!(
                     "[VNC][LOCK] scancode input code=0x{:02X} extended={} down={}",
                     code, extended, down
@@ -395,7 +395,7 @@ async fn handle_remote_input(
             }
 
             if let Some(keysym) = keysym_from_scancode_with_state(code, extended, key_state) {
-                if is_lock_scancode(code) {
+                if is_lock_scancode(code, extended) {
                     info!(
                         "[VNC][LOCK] mapped scancode code=0x{:02X} extended={} -> keysym=0x{:X}",
                         code, extended, keysym
@@ -533,8 +533,10 @@ fn keysym_from_scancode_with_state(
         (0x42, _) => 0xffc5,     // F8
         (0x43, _) => 0xffc6,     // F9
         (0x44, _) => 0xffc7,     // F10
-        (0x45, _) => 0xff7f,     // Num_Lock
+        (0x45, false) => 0xff7f, // Num_Lock
         (0x46, _) => 0xff14,     // Scroll_Lock
+        (0x37, true) => 0xff61,  // Print
+        (0x45, true) => 0xff13,  // Pause
         (0x47, true) => 0xff50,  // Home
         (0x48, true) => 0xff52,  // Up
         (0x49, true) => 0xff55,  // Page_Up
@@ -552,6 +554,13 @@ fn keysym_from_scancode_with_state(
         (0x5b, _) => 0xffeb,     // Super_L
         (0x5c, _) => 0xffec,     // Super_R
         (0x5d, _) => 0xff67,     // Menu
+        (0x10, true) => 0x1008FF16, // XF86AudioPrev
+        (0x19, true) => 0x1008FF17, // XF86AudioNext
+        (0x20, true) => 0x1008FF12, // XF86AudioMute
+        (0x22, true) => 0x1008FF14, // XF86AudioPlay
+        (0x24, true) => 0x1008FF15, // XF86AudioStop
+        (0x2e, true) => 0x1008FF11, // XF86AudioLowerVolume
+        (0x30, true) => 0x1008FF13, // XF86AudioRaiseVolume
         _ => return None,
     };
 
@@ -695,8 +704,8 @@ async fn send_lock_toggle(vnc: &VncClient, keysym: u32) -> Result<(), String> {
     send_key(vnc, keysym, false).await
 }
 
-fn is_lock_scancode(code: u8) -> bool {
-    matches!(code, 0x3A | 0x45 | 0x46)
+fn is_lock_scancode(code: u8, extended: bool) -> bool {
+    matches!((code, extended), (0x3A, _) | (0x45, false) | (0x46, _))
 }
 
 fn is_modifier_scancode(code: u8, extended: bool) -> bool {
