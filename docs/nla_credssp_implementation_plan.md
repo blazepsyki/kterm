@@ -85,7 +85,7 @@ CredSSP 실패 시 발생하는 에러 유형을 구분:
 ### Phase 2: 도메인 인증 지원
 
 **난이도**: 낮음  
-**예상 변경 파일**: `src/connection/rdp.rs`, `src/main.rs`
+**예상 변경 파일**: `src/connection/rdp.rs`, `src/app/state.rs`, `src/app/update.rs`, `src/ui/view.rs`
 
 #### 2-1. UI에 도메인 필드 추가
 

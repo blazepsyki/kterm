@@ -302,7 +302,7 @@
 - [x] pre-keydown sync / modifier release 경로의 중복 로직 정리
 
 ### 미완 항목
-- [ ] `main.rs` `map_key_to_rdp_scancode()` 개선 (`ironrdp-input` 키 매핑 테이블 활용)
+- [ ] `src/connection/remote_input_policy.rs`의 스캔코드 매핑/정책을 `ironrdp-input` 테이블 기반으로 추가 정밀화
 - [ ] IME 조합 입력 기초 지원 (한국어/일본어/중국어)
 - [x] 마우스 수평 휠 (`MouseHorizontalWheel`) — `connection/mod.rs` + `rdp.rs` `handle_rdp_input()`에 구현 완료
 - [ ] 복합 키 조합 정밀 매핑 (Ctrl+Alt+Del, Win 키 등)
@@ -344,6 +344,8 @@
 6. **플랫폼 범위**:
    - 현재 앱 코드에서 `WinClipboard` 경로는 `cfg(windows)`로만 활성화
    - 비-Windows 빌드에서는 CLIPRDR 백엔드 팩토리를 연결하지 않으므로 이 경로는 동작하지 않음
+   - 구현 위치: `src/platform/windows.rs` (`create_cliprdr_backend`, `remove_clipboard_for_session`)
+   - 호출 위치: `src/app/update.rs` (RDP 연결/탭 종료 시 호출)
 
 #### 기대 효과
 - 복사/붙여넣기 연동 (RDP에서 가장 자주 요청되는 기능)
@@ -368,8 +370,8 @@
 
 #### 권장 구조
 1. **공통 추상화 추가**:
-   - `CliprdrBackendFactory`를 플랫폼별로 생성하는 앱 레벨 팩토리 계층 도입
-   - `main.rs`의 `cfg(windows)` 분기를 `platform/clipboard_*` 모듈로 이동
+   - `CliprdrBackendFactory`를 플랫폼별로 생성하는 앱 레벨 팩토리 계층 유지
+   - (완료) 기존 `main.rs`의 `cfg(windows)` 분기를 `src/platform/windows.rs`로 이동
 2. **플랫폼별 백엔드**:
    - Windows: 기존 `WinClipboard` 유지
    - Linux/macOS: `CliprdrBackend` 구현체를 앱 내부에 추가
@@ -403,11 +405,11 @@
 4. **현재 UI clipboard와 역할 분리**:
    - Iced clipboard는 사용자 명시 복사/붙여넣기용으로 남기고, Phase 4-2는 세션 동기화 백엔드로 별도 유지하는 편이 안전
 
-#### 예상 구현 단계
-1. `platform/clipboard/mod.rs` 도입: 공통 팩토리 인터페이스 정의
-2. `platform/clipboard_windows.rs`: 현재 `WinClipboard` 연동 코드 이동
-3. `platform/clipboard_unix.rs`: Linux/macOS용 `CliprdrBackend` + 폴링 루프 구현
-4. `main.rs`: 플랫폼별 백엔드 생성 호출만 남기도록 단순화
+#### 예상 구현 단계 (현 구조 반영)
+1. `src/platform/windows.rs`: WinClipboard 연동 + 플랫폼 팩토리 함수 (완료)
+2. `src/platform/clipboard_unix.rs`(신규): Linux/macOS용 `CliprdrBackend` + 폴링 루프 구현
+3. `src/app/update.rs`: 플랫폼별 백엔드 생성 호출 유지 (`platform::windows::create_cliprdr_backend`)
+4. `src/main.rs`: 플랫폼 분기 없이 부트스트랩 전용 구조 유지
 5. Linux(X11/Wayland), macOS 각각에서 텍스트 양방향 검증
 
 #### 완료 조건
@@ -760,31 +762,32 @@ rdp.rs
    └── nscodec.rs (선택, 추후)     // IronRDP 공식 NSCodec 지원 후 필요 시 보조 경로 검토
 ```
 
-### `src/connection/mod.rs` 확장
+### `src/connection/mod.rs` 확장 (현 코드 기준)
 
 ```rust
-pub enum RdpInput {
-    // 기존 유지
+pub enum RemoteInput {
     KeyboardScancode { .. },
     KeyboardUnicode { .. },
     MouseMove { .. },
     MouseButton { .. },
     MouseWheel { .. },
-    // 추가
     MouseHorizontalWheel { delta: i16 },
-    ClipboardUpdate { text: String },
 }
 
 pub enum ConnectionEvent {
-    // 기존 유지
     Connected(..),
     Data(..),
     Frames(..),
     Disconnected,
     Error(String),
-    // 추가
-    ClipboardReceived(String),
-    ResolutionChanged { width: u16, height: u16 },
+}
+
+pub enum ConnectionInput {
+   Data(Vec<u8>),
+   Resize { cols: u16, rows: u16 },
+   SyncKeyboardIndicators(KeyboardIndicators),
+   ReleaseAllModifiers,
+   RemoteInput(RemoteInput),
 }
 ```
 

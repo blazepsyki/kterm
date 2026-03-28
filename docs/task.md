@@ -44,7 +44,7 @@
     - [x] 마우스 수평 휠 (`MouseHorizontalWheel`) 매핑
   - [x] NLA/CredSSP 활성화 (`enable_credssp: true`)
   - [x] 클립보드 공유 (Phase 4-1 Windows): `ironrdp-cliprdr`/`ironrdp-cliprdr-native` 기반
-    - [x] `WinClipboard` + `ChannelProxy` 초기화 (`main.rs`)
+    - [x] `WinClipboard` + `ChannelProxy` 초기화 (`src/platform/windows.rs`)
     - [x] `connect_and_subscribe()`에 `cliprdr_factory`/`clipboard_rx_opt` 전달 배선
     - [x] `CliprdrClient` 정적 채널 등록 + OS 클립보드 이벤트 처리 루프
     - [x] 텍스트 복사/붙여넣기 양방향 검증 완료

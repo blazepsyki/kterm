@@ -20,8 +20,8 @@
 ## 현재 진행 상태 (2026-03-28)
 - 구현 완료(코드 반영)
   - src/connection/mod.rs: VNC 모듈 노출 및 공용 ConnectionEvent/ConnectionInput 경로 연결
-  - src/main.rs: VNC 프로토콜 탭/입력 폼/메시지/ConnectVnc 라우팅 연결
-  - src/main.rs + src/remote_display/*: VNC가 RDP와 동일한 RemoteDisplay 렌더 경로(frame_seq, dirty_rects, full_upload)를 사용
+  - src/app/{state,message,update}.rs + src/ui/view.rs: VNC 프로토콜 탭/입력 폼/메시지/ConnectVnc 라우팅 연결
+  - src/ui/view.rs + src/remote_display/*: VNC가 RDP와 동일한 RemoteDisplay 렌더 경로(frame_seq, dirty_rects, full_upload)를 사용
   - src/connection/vnc.rs:
     - connect_and_subscribe 워커/스트림 구조 구현
     - TCP 연결 타임아웃 + 인증 경고 + 초기 FullRefresh 요청
@@ -60,7 +60,7 @@
  - 2026-03-28 반영: healing FullRefresh(2s) 보정으로 잔상 체류 시간의 상한을 제어.
 
 4. Phase D - 렌더러 실제 최적화 활성화 (완료)
-- main.rs 뷰에서 dirty_rects/full_upload 플래그를 실제 사용하도록 연결한다.
+- src/ui/view.rs 뷰에서 dirty_rects/full_upload 플래그를 실제 사용하도록 연결한다.
 - remote_display mark_clean 호출 시점을 정의해 부분 업로드 경로를 활성화한다.
  - 2026-03-28 반영: VNC 세션에서 rect-only 배치가 연속될 때 full_upload를 강제 승격하는 튜닝 규칙 추가.
  - 2026-03-28 반영: VNC rect batch 급증 시(임계치) 즉시 full_upload 승격으로 잔상 체류 시간 단축.
@@ -100,7 +100,8 @@
 
 ## Relevant files
 - d:/Downloads/Rust_dev/kterm/src/connection/vnc.rs - 연결/인증, 이벤트 루프, 입력/프레임 변환 핵심.
-- d:/Downloads/Rust_dev/kterm/src/main.rs - ProtocolMode/ConnectVnc 라우팅, RemoteDisplay 뷰 연결.
+- d:/Downloads/Rust_dev/kterm/src/app/update.rs - ConnectVnc 라우팅 및 연결 이벤트 처리.
+- d:/Downloads/Rust_dev/kterm/src/ui/view.rs - VNC 탭 입력 폼/RemoteDisplay 뷰 렌더링.
 - d:/Downloads/Rust_dev/kterm/src/remote_display/mod.rs - FrameUpdate 적용, dirty_rects/full_upload 상태.
 - d:/Downloads/Rust_dev/kterm/src/remote_display/renderer.rs - 부분 텍스처 업로드 및 GPU 렌더링.
 - d:/Downloads/Rust_dev/kterm/src/connection/remote_input_policy.rs - 공용 키 라우팅 정책.
@@ -158,7 +159,7 @@
   - 초기 전체 프레임 요청(FullRefresh) 명시 전송
 - [시작] Phase D(렌더러 최적화) 착수
   - RemoteDisplayState에 frame_seq 도입 및 증분 업데이트 전환 로직 추가
-  - main.rs 셰이더 Program에 dirty_rects/full_upload/frame_seq 실배선
+  - ui/view.rs 셰이더 Program에 dirty_rects/full_upload/frame_seq 실배선
   - renderer 파이프라인에 last_uploaded_seq 추적을 추가해 동일 프레임 중복 업로드 방지
 - [시작] Phase E(입력 안정화) 착수
   - ConnectionInput::SyncKeyboardIndicators를 VNC 경로에서 무시하지 않고 처리
