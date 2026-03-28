@@ -6,6 +6,73 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize, MasterPty, Child}
 use std::io::Write;
 use crate::connection::{ConnectionEvent, ConnectionInput};
 
+#[cfg(windows)]
+use ironrdp_cliprdr::backend::{ClipboardMessage, ClipboardMessageProxy, CliprdrBackendFactory};
+#[cfg(windows)]
+use ironrdp_cliprdr_native::WinClipboard;
+
+#[cfg(windows)]
+#[derive(Debug)]
+struct ChannelProxy {
+    tx: mpsc::UnboundedSender<ClipboardMessage>,
+}
+
+#[cfg(windows)]
+impl ClipboardMessageProxy for ChannelProxy {
+    fn send_clipboard_message(&self, message: ClipboardMessage) {
+        let _ = self.tx.send(message);
+    }
+}
+
+#[cfg(windows)]
+thread_local! {
+    static WIN_CLIPBOARDS: std::cell::RefCell<std::collections::HashMap<u64, WinClipboard>>
+        = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+#[cfg(windows)]
+pub fn create_cliprdr_backend(
+    session_id: u64,
+) -> (
+    Option<Box<dyn CliprdrBackendFactory + Send>>,
+    Option<mpsc::UnboundedReceiver<ClipboardMessage>>,
+) {
+    let (cb_tx, cb_rx) = mpsc::unbounded_channel::<ClipboardMessage>();
+    let proxy = Box::new(ChannelProxy { tx: cb_tx });
+
+    match WinClipboard::new(*proxy) {
+        Ok(win_clipboard) => {
+            let factory = win_clipboard.backend_factory();
+            WIN_CLIPBOARDS.with(|m| m.borrow_mut().insert(session_id, win_clipboard));
+            (Some(factory), Some(cb_rx))
+        }
+        Err(e) => {
+            log::info!("[CLIPRDR] WinClipboard creation failed: {}", e);
+            (None, None)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn create_cliprdr_backend(
+    _session_id: u64,
+) -> (
+    Option<Box<dyn ironrdp_cliprdr::backend::CliprdrBackendFactory + Send>>,
+    Option<mpsc::UnboundedReceiver<ironrdp_cliprdr::backend::ClipboardMessage>>,
+) {
+    (None, None)
+}
+
+#[cfg(windows)]
+pub fn remove_clipboard_for_session(session_id: u64) {
+    WIN_CLIPBOARDS.with(|m| {
+        m.borrow_mut().remove(&session_id);
+    });
+}
+
+#[cfg(not(windows))]
+pub fn remove_clipboard_for_session(_session_id: u64) {}
+
 /// 로컬 셸의 상태를 관리하기 위한 구조체
 struct LocalShellState {
     master: Box<dyn MasterPty + Send>,
