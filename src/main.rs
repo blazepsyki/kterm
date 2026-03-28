@@ -184,6 +184,7 @@ enum SessionKind {
     Welcome,
     Terminal,
     RemoteDisplay,
+    Settings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +195,24 @@ pub enum ProtocolMode {
     Local,
     Rdp,
     Vnc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTabKind {
+    Preferences,
+    Theme,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsToggleKey {
+    AutoReconnect,
+    UseAgentForwarding,
+    EchoLocally,
+    HardwareFlowControl,
+    LaunchInLoginMode,
+    RdpNla,
+    VncRemoteCursor,
+    CompactTabStyle,
 }
 
 #[derive(Debug, Clone)]
@@ -274,6 +293,7 @@ struct Session {
     sender: Option<mpsc::UnboundedSender<connection::ConnectionInput>>,
     rdp_secure_attention_active: bool,
     vnc_rect_only_streak: u32,
+    settings_tab_kind: Option<SettingsTabKind>,
 }
 
 impl Session {
@@ -287,6 +307,7 @@ impl Session {
             sender: None,
             rdp_secure_attention_active: false,
             vnc_rect_only_streak: 0,
+            settings_tab_kind: None,
         }
     }
 
@@ -300,6 +321,7 @@ impl Session {
             sender: None,
             rdp_secure_attention_active: false,
             vnc_rect_only_streak: 0,
+            settings_tab_kind: None,
         }
     }
 
@@ -313,6 +335,26 @@ impl Session {
             sender: None,
             rdp_secure_attention_active: false,
             vnc_rect_only_streak: 0,
+            settings_tab_kind: None,
+        }
+    }
+
+    fn new_settings(id: u64, tab_kind: SettingsTabKind) -> Self {
+        let name = match tab_kind {
+            SettingsTabKind::Preferences => "Settings".to_string(),
+            SettingsTabKind::Theme => "Theme".to_string(),
+        };
+
+        Self {
+            id,
+            name,
+            kind: SessionKind::Settings,
+            terminal: TerminalEmulator::new(24, 80),
+            remote_display: None,
+            sender: None,
+            rdp_secure_attention_active: false,
+            vnc_rect_only_streak: 0,
+            settings_tab_kind: Some(tab_kind),
         }
     }
 }
@@ -361,6 +403,16 @@ struct State {
     pub dummy_menu_open: Option<&'static str>,
     pub resizing_direction: Option<window::Direction>,
     pub window_size: (f32, f32),
+    // Settings UI state
+    settings_selected_category: usize,  // 선택된 설정 카테고리 인덱스
+    settings_auto_reconnect: bool,
+    settings_ssh_use_agent_forwarding: bool,
+    settings_telnet_echo_locally: bool,
+    settings_serial_hardware_flow_control: bool,
+    settings_local_launch_in_login_mode: bool,
+    settings_rdp_nla: bool,
+    settings_vnc_remote_cursor: bool,
+    settings_theme_compact_tab_style: bool,
 }
 
 impl Default for State {
@@ -408,6 +460,15 @@ impl Default for State {
             dummy_menu_open: None,
             resizing_direction: None,
             window_size: (1024.0, 768.0),
+            settings_selected_category: 0,
+            settings_auto_reconnect: false,
+            settings_ssh_use_agent_forwarding: false,
+            settings_telnet_echo_locally: true,
+            settings_serial_hardware_flow_control: false,
+            settings_local_launch_in_login_mode: true,
+            settings_rdp_nla: true,
+            settings_vnc_remote_cursor: true,
+            settings_theme_compact_tab_style: false,
         }
     }
 }
@@ -442,6 +503,32 @@ impl State {
                 self.vnc_id_pass.clone(),
             ],
             ProtocolMode::Local => vec![],
+        }
+    }
+
+    fn settings_checkbox_value(&self, key: SettingsToggleKey) -> bool {
+        match key {
+            SettingsToggleKey::AutoReconnect => self.settings_auto_reconnect,
+            SettingsToggleKey::UseAgentForwarding => self.settings_ssh_use_agent_forwarding,
+            SettingsToggleKey::EchoLocally => self.settings_telnet_echo_locally,
+            SettingsToggleKey::HardwareFlowControl => self.settings_serial_hardware_flow_control,
+            SettingsToggleKey::LaunchInLoginMode => self.settings_local_launch_in_login_mode,
+            SettingsToggleKey::RdpNla => self.settings_rdp_nla,
+            SettingsToggleKey::VncRemoteCursor => self.settings_vnc_remote_cursor,
+            SettingsToggleKey::CompactTabStyle => self.settings_theme_compact_tab_style,
+        }
+    }
+
+    fn toggle_settings_checkbox(&mut self, key: SettingsToggleKey) {
+        match key {
+            SettingsToggleKey::AutoReconnect => self.settings_auto_reconnect = !self.settings_auto_reconnect,
+            SettingsToggleKey::UseAgentForwarding => self.settings_ssh_use_agent_forwarding = !self.settings_ssh_use_agent_forwarding,
+            SettingsToggleKey::EchoLocally => self.settings_telnet_echo_locally = !self.settings_telnet_echo_locally,
+            SettingsToggleKey::HardwareFlowControl => self.settings_serial_hardware_flow_control = !self.settings_serial_hardware_flow_control,
+            SettingsToggleKey::LaunchInLoginMode => self.settings_local_launch_in_login_mode = !self.settings_local_launch_in_login_mode,
+            SettingsToggleKey::RdpNla => self.settings_rdp_nla = !self.settings_rdp_nla,
+            SettingsToggleKey::VncRemoteCursor => self.settings_vnc_remote_cursor = !self.settings_vnc_remote_cursor,
+            SettingsToggleKey::CompactTabStyle => self.settings_theme_compact_tab_style = !self.settings_theme_compact_tab_style,
         }
     }
 }
@@ -511,6 +598,10 @@ pub enum Message {
     ReleaseRdpModifiers,
     WindowSizeChanged(f32, f32),
     RemoteDisplayRedrawPulse,
+    // Settings UI messages
+    OpenSettingsTab(SettingsTabKind),
+    SettingsCategorySelected(usize),
+    ToggleSettingsCheckbox(SettingsToggleKey),
 }
 
 // ---------- Update ----------
@@ -1132,6 +1223,23 @@ fn update(state: &mut State, message: Message) -> Task<Message> {
             state.dummy_menu_open = None;
             Task::none()
         }
+        Message::OpenSettingsTab(tab_kind) => {
+            let id = state.next_session_id;
+            state.next_session_id += 1;
+            state.settings_selected_category = 0;
+            state.sessions.push(Session::new_settings(id, tab_kind));
+            state.active_index = state.sessions.len() - 1;
+            state.dummy_menu_open = None;
+            Task::none()
+        }
+        Message::SettingsCategorySelected(index) => {
+            state.settings_selected_category = index;
+            Task::none()
+        }
+        Message::ToggleSettingsCheckbox(key) => {
+            state.toggle_settings_checkbox(key);
+            Task::none()
+        }
     }
 }
 
@@ -1162,9 +1270,10 @@ fn subscription(state: &State) -> Subscription<Message> {
     });
 
     let menu_close_sub = if matches!(state.dummy_menu_open, Some(menu) if !menu.is_empty()) {
-        event::listen_with(|event, _status, _window| {
+        event::listen_with(|event, status, _window| {
             match event {
-                iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => Some(Message::CloseMenuDeferred),
+                // 메뉴 항목 클릭(캡처된 이벤트)은 유지하고, 외부 클릭(무시된 이벤트)에서만 닫기
+                iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) if matches!(status, event::Status::Ignored) => Some(Message::CloseMenuDeferred),
                 _ => None,
             }
         })
@@ -1375,6 +1484,244 @@ fn hr() -> Element<'static, Message> {
 
 fn vr() -> Element<'static, Message> {
     container(Space::new().width(Length::Fixed(1.0)).height(Length::Fill)).style(|_| iced::widget::container::Style { background: Some(Background::Color(Color::from_rgb(0.5, 0.5, 0.5))), ..Default::default() }).into()
+}
+
+// ─── Settings 탭 헬퍼 함수들 ───────────────────────────────────────────────────
+
+fn get_settings_categories(tab_kind: SettingsTabKind) -> Vec<&'static str> {
+    match tab_kind {
+        SettingsTabKind::Preferences => vec![
+            "Common",
+            "SSH",
+            "Telnet",
+            "Serial",
+            "Local Shell",
+            "RDP",
+            "VNC",
+        ],
+        SettingsTabKind::Theme => vec!["Theme"],
+    }
+}
+
+fn settings_header(tab_kind: SettingsTabKind) -> &'static str {
+    match tab_kind {
+        SettingsTabKind::Preferences => "Preferences",
+        SettingsTabKind::Theme => "Theme Settings",
+    }
+}
+
+fn render_settings_sidebar(tab_kind: SettingsTabKind, selected_index: usize) -> Element<'static, Message> {
+    let categories = get_settings_categories(tab_kind);
+    
+    let mut category_buttons = column![].spacing(2);
+    
+    for (idx, category) in categories.iter().enumerate() {
+        let is_selected = idx == selected_index;
+
+        category_buttons = category_buttons.push(
+            button(
+                container(text(*category).size(13))
+                    .width(Length::Fill)
+                    .padding([10, 0])
+            )
+            .width(Length::Fill)
+            .padding([6, 8])
+            .style(move |_t, s| {
+                let mut st = button::text(_t, s);
+                if is_selected {
+                    st.background = Some(Background::Color(Color::from_rgb(0.2, 0.4, 0.6)));
+                    st.text_color = Color::WHITE;
+                } else {
+                    st.background = Some(Background::Color(if matches!(s, button::Status::Hovered) {
+                        Color::from_rgb(0.15, 0.15, 0.15)
+                    } else {
+                        Color::TRANSPARENT
+                    }));
+                    st.text_color = Color::from_rgb(0.7, 0.7, 0.7);
+                }
+                st
+            })
+            .on_press(Message::SettingsCategorySelected(idx))
+        );
+    }
+    
+    container(
+        scrollable(
+            column![
+                text(settings_header(tab_kind)).size(12).font(Font { weight: Weight::Bold, ..Default::default() }),
+                Space::new().height(Length::Fixed(12.0)),
+                category_buttons,
+            ]
+            .spacing(8)
+            .padding(10)
+        )
+    )
+    .width(Length::Fixed(180.0))
+    .height(Length::Fill)
+    .style(|_| container::Style {
+        background: Some(Background::Color(Color::from_rgb(0.11, 0.11, 0.11))),
+        ..Default::default()
+    })
+    .into()
+}
+
+fn setting_row(label: &'static str, placeholder: &'static str) -> Element<'static, Message> {
+    row![
+        column![
+            text(label).size(13),
+            text("Placeholder").size(11).color(Color::from_rgb(0.58, 0.58, 0.58)),
+        ]
+        .spacing(2)
+        .width(Length::Fill),
+        container(text_input("", placeholder).padding([6, 10]).width(Length::Fixed(240.0)))
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color::from_rgb(0.10, 0.10, 0.10))),
+                border: iced::Border {
+                    width: 1.0,
+                    color: Color::from_rgb(0.24, 0.24, 0.24),
+                    radius: 6.0.into(),
+                },
+                ..Default::default()
+            })
+    ]
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+fn checkbox_placeholder_row(label: &'static str, key: SettingsToggleKey, checked: bool) -> Element<'static, Message> {
+    let check_label = if checked { "[x]" } else { "[ ]" };
+    let status_label = if checked { "ON" } else { "OFF" };
+
+    row![
+        column![
+            text(label).size(13),
+            text("Checkbox Placeholder").size(11).color(Color::from_rgb(0.58, 0.58, 0.58)),
+        ]
+        .spacing(2)
+        .width(Length::Fill),
+        button(
+            row![
+                text(check_label).size(12),
+                text(status_label).size(12).font(Font { weight: Weight::Bold, ..Default::default() }),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+        )
+        .width(Length::Fixed(90.0))
+        .padding([6, 8])
+        .style(move |_t, s| {
+            let mut st = button::secondary(_t, s);
+            st.background = Some(Background::Color(if checked {
+                Color::from_rgb(0.18, 0.34, 0.22)
+            } else {
+                Color::from_rgb(0.18, 0.18, 0.18)
+            }));
+            st.text_color = Color::from_rgb(0.92, 0.92, 0.92);
+            st.border = iced::Border {
+                width: 1.0,
+                color: if checked { Color::from_rgb(0.34, 0.54, 0.38) } else { Color::from_rgb(0.35, 0.35, 0.35) },
+                radius: 6.0.into(),
+            };
+            st
+        })
+        .on_press(Message::ToggleSettingsCheckbox(key))
+    ]
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+fn render_settings_panel(state: &State, tab_kind: SettingsTabKind, selected_index: usize) -> Element<'static, Message> {
+    let categories = get_settings_categories(tab_kind);
+    let category_name = categories.get(selected_index).copied().unwrap_or("Unknown");
+
+    let title = match tab_kind {
+        SettingsTabKind::Preferences => format!("{} Settings", category_name),
+        SettingsTabKind::Theme => "Theme Settings".to_string(),
+    };
+
+    let content: Element<'_, Message> = match (tab_kind, category_name) {
+        (SettingsTabKind::Preferences, "Common") => column![
+            text(title).size(18).font(Font { weight: Weight::Bold, ..Default::default() }),
+            text("Adjust application-wide behavior.").size(12).color(Color::from_rgb(0.65, 0.65, 0.65)),
+            Space::new().height(Length::Fixed(10.0)),
+            setting_row("Default Connection Profile", "placeholder-default-profile"),
+            checkbox_placeholder_row("Auto-reconnect", SettingsToggleKey::AutoReconnect, state.settings_checkbox_value(SettingsToggleKey::AutoReconnect)),
+            setting_row("Global Timeout", "placeholder-timeout-ms"),
+        ].spacing(14).into(),
+        (SettingsTabKind::Preferences, "SSH") => column![
+            text(title).size(18).font(Font { weight: Weight::Bold, ..Default::default() }),
+            text("Configure SSH behavior.").size(12).color(Color::from_rgb(0.65, 0.65, 0.65)),
+            Space::new().height(Length::Fixed(10.0)),
+            setting_row("Host Key Policy", "placeholder-strict-checking"),
+            setting_row("Keep Alive Interval", "placeholder-interval-sec"),
+            checkbox_placeholder_row("Use Agent Forwarding", SettingsToggleKey::UseAgentForwarding, state.settings_checkbox_value(SettingsToggleKey::UseAgentForwarding)),
+        ].spacing(14).into(),
+        (SettingsTabKind::Preferences, "Telnet") => column![
+            text(title).size(18).font(Font { weight: Weight::Bold, ..Default::default() }),
+            text("Configure Telnet behavior.").size(12).color(Color::from_rgb(0.65, 0.65, 0.65)),
+            Space::new().height(Length::Fixed(10.0)),
+            setting_row("Negotiation Mode", "placeholder-auto"),
+            setting_row("Line Ending", "placeholder-CRLF"),
+            checkbox_placeholder_row("Echo Locally", SettingsToggleKey::EchoLocally, state.settings_checkbox_value(SettingsToggleKey::EchoLocally)),
+        ].spacing(14).into(),
+        (SettingsTabKind::Preferences, "Serial") => column![
+            text(title).size(18).font(Font { weight: Weight::Bold, ..Default::default() }),
+            text("Configure Serial behavior.").size(12).color(Color::from_rgb(0.65, 0.65, 0.65)),
+            Space::new().height(Length::Fixed(10.0)),
+            setting_row("Default Baud Rate", "placeholder-115200"),
+            setting_row("Parity", "placeholder-none"),
+            checkbox_placeholder_row("Hardware Flow Control", SettingsToggleKey::HardwareFlowControl, state.settings_checkbox_value(SettingsToggleKey::HardwareFlowControl)),
+        ].spacing(14).into(),
+        (SettingsTabKind::Preferences, "Local Shell") => column![
+            text(title).size(18).font(Font { weight: Weight::Bold, ..Default::default() }),
+            text("Configure local shell launch behavior.").size(12).color(Color::from_rgb(0.65, 0.65, 0.65)),
+            Space::new().height(Length::Fixed(10.0)),
+            setting_row("Default Shell", "placeholder-pwsh"),
+            setting_row("Startup Args", "placeholder-no-logo"),
+            checkbox_placeholder_row("Launch In Login Mode", SettingsToggleKey::LaunchInLoginMode, state.settings_checkbox_value(SettingsToggleKey::LaunchInLoginMode)),
+        ].spacing(14).into(),
+        (SettingsTabKind::Preferences, "RDP") => column![
+            text(title).size(18).font(Font { weight: Weight::Bold, ..Default::default() }),
+            text("Configure RDP behavior.").size(12).color(Color::from_rgb(0.65, 0.65, 0.65)),
+            Space::new().height(Length::Fixed(10.0)),
+            setting_row("Default Resolution", "placeholder-1280x720"),
+            setting_row("Color Depth", "placeholder-32bit"),
+            checkbox_placeholder_row("NLA", SettingsToggleKey::RdpNla, state.settings_checkbox_value(SettingsToggleKey::RdpNla)),
+        ].spacing(14).into(),
+        (SettingsTabKind::Preferences, "VNC") => column![
+            text(title).size(18).font(Font { weight: Weight::Bold, ..Default::default() }),
+            text("Configure VNC behavior.").size(12).color(Color::from_rgb(0.65, 0.65, 0.65)),
+            Space::new().height(Length::Fixed(10.0)),
+            setting_row("Encoding", "placeholder-tight"),
+            setting_row("Compression", "placeholder-medium"),
+            checkbox_placeholder_row("Remote Cursor", SettingsToggleKey::VncRemoteCursor, state.settings_checkbox_value(SettingsToggleKey::VncRemoteCursor)),
+        ].spacing(14).into(),
+        (SettingsTabKind::Theme, "Theme") => column![
+            text(title).size(18).font(Font { weight: Weight::Bold, ..Default::default() }),
+            text("Theme options placeholder.").size(12).color(Color::from_rgb(0.65, 0.65, 0.65)),
+            Space::new().height(Length::Fixed(10.0)),
+            setting_row("Color Theme", "placeholder-dark"),
+            setting_row("Terminal Font Family", "placeholder-d2coding"),
+            checkbox_placeholder_row("Use Compact Tab Style", SettingsToggleKey::CompactTabStyle, state.settings_checkbox_value(SettingsToggleKey::CompactTabStyle)),
+        ].spacing(14).into(),
+        _ => column![
+            text(title).size(18).font(Font { weight: Weight::Bold, ..Default::default() }),
+            text("No settings available.").size(12).color(Color::from_rgb(0.65, 0.65, 0.65)),
+        ].spacing(14).into(),
+    };
+    
+    container(
+        scrollable(content)
+            .height(Length::Fill)
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .padding(30)
+    .style(|_| container::Style {
+        background: Some(Background::Color(Color::from_rgb(0.12, 0.12, 0.12))),
+        ..Default::default()
+    })
+    .into()
 }
 
 fn view(state: &State) -> Element<'_, Message> {
@@ -1672,6 +2019,23 @@ fn view(state: &State) -> Element<'_, Message> {
                         .into()
                 }
             }
+            SessionKind::Settings => {
+                if let Some(tab_kind) = session.settings_tab_kind {
+                    row![
+                        render_settings_sidebar(tab_kind, state.settings_selected_category),
+                        vr(),
+                        container(render_settings_panel(state, tab_kind, state.settings_selected_category))
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                    ]
+                    .height(Length::Fill)
+                    .into()
+                } else {
+                    container(text("Settings protocol not selected"))
+                        .center(Length::Fill)
+                        .into()
+                }
+            }
         }
     } else { text("No active tab").into() };
 
@@ -1734,9 +2098,17 @@ fn view(state: &State) -> Element<'_, Message> {
                         button(text("Close Current Tab").size(12)).width(Length::Fill).style(button::text).on_press(Message::CloseTab(state.active_index))
                     ]
                     .spacing(2)
-                    .width(Length::Fixed(180.0))
+                    .width(Length::Fixed(200.0))
                 ),
-                "Settings" => container(column![button(text("App Settings").size(12)).width(Length::Fill).style(button::text), button(text("Terminal Theme").size(12)).width(Length::Fill).style(button::text), button(text("Font Settings").size(12)).width(Length::Fill).style(button::text)].spacing(2).width(Length::Fixed(160.0))),
+                "Settings" => container(
+                    column![
+                        button(text("Preferences").size(12)).width(Length::Fill).style(button::text).on_press(Message::OpenSettingsTab(SettingsTabKind::Preferences)),
+                        hr(),
+                        button(text("Theme").size(12)).width(Length::Fill).style(button::text).on_press(Message::OpenSettingsTab(SettingsTabKind::Theme))
+                    ]
+                    .spacing(2)
+                    .width(Length::Fixed(170.0))
+                ),
                 _ => container(column![button(text(format!("{} Option 1", menu)).size(12)).width(Length::Fill).style(button::text), button(text(format!("{} Option 2", menu)).size(12)).width(Length::Fill).style(button::text)].spacing(2).width(Length::Fixed(160.0))),
             }.padding(4).style(|_| container::Style { background: Some(Background::Color(Color::from_rgb(0.18, 0.18, 0.18))), border: iced::Border { width: 1.0, color: Color::from_rgb(0.3, 0.3, 0.3), radius: 4.0f32.into() }, ..Default::default() });
             let h_offset: f32 = match menu { "Session" => 95.0, "Settings" => 95.0 + 72.0, "View" => 95.0 + 72.0 * 2.0, "Help" => 95.0 + 72.0 * 3.0, _ => 95.0 };
