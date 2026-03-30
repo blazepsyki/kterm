@@ -112,6 +112,8 @@ graph TD
 - `connection/remote_input_policy.rs`가 Iced 키 이벤트를 프로토콜 중립적인 `RemoteInput`으로 정규화합니다.
 - `app/update.rs`가 공통 메시지를 받아 `ConnectionInput::RemoteInput`, `ConnectionInput::SyncKeyboardIndicators`, `ConnectionInput::ReleaseAllModifiers`로 워커 채널에 전달합니다.
 - `app/update.rs`의 `transform_remote_mouse()`가 공통 뷰포트 기준 좌표 변환을 수행하므로, 마우스 좌표 정책도 상단에서는 공유됩니다.
+- `SessionKind::RemoteDisplay` 하나로 RDP/VNC를 함께 표현하고, 두 프로토콜 모두 `RemoteDisplayState`를 공유합니다.
+- 원격 디스플레이 프로토콜 판별은 `Session.remote_display_protocol`의 `RemoteDisplayProtocol::{Rdp,Vnc}`로 처리합니다.
 - `remote_display/mod.rs`와 `remote_display/renderer.rs`는 RDP/VNC 모두가 생성한 `FrameUpdate`를 동일한 GPU 렌더 경로로 처리합니다.
 
 프로토콜별 어댑터:
@@ -119,8 +121,6 @@ graph TD
 - `vnc.rs`는 동일한 `ConnectionInput`을 VNC X11 key/pointer 이벤트로 변환합니다.
 
 현재 완전 분리로 보기 어려운 결합 지점:
-- `SessionKind::RemoteDisplay` 하나로 RDP/VNC를 함께 표현하고, 두 프로토콜 모두 `RemoteDisplayState`를 공유합니다.
-- 원격 디스플레이 프로토콜 판별은 `Session.remote_display_protocol`의 `RemoteDisplayProtocol::{Rdp,Vnc}`로 처리합니다.
 - 프로토콜 비특정 bootstrap/large-batch full-upload fallback은 `app/update.rs`가 아니라 `remote_display/mod.rs`의 `RemoteDisplayState::apply_batch()`가 담당합니다.
 - 포커스 획득/상실 시점의 lock-key sync와 modifier release는 공통 메시지로 처리되지만, 실제 의미와 변환 방식은 각 백엔드에서 다릅니다.
 
