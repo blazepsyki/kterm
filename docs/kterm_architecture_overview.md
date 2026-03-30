@@ -38,6 +38,7 @@ graph TD
    A[app/update.rs : 상태 전이 및 라우팅]
    V[ui/view.rs : UI 렌더링]
    S0[app/state.rs + app/message.rs + app/model.rs]
+   SP[app/settings_persistence.rs : 설정 JSON 로드/저장]
    LS[app/local_shell.rs : 시스템 셸 탐지]
     T[terminal.rs : 가상 터미널 그래픽 엔진]
     C{connection/mod.rs : 공용 인터페이스}
@@ -55,10 +56,13 @@ graph TD
    M --> A
    M --> V
    M --> S0
+   M --> SP
    S0 --> LS
+   SP --> S0
 
    V -->|UI 이벤트 Message| A
    A -->|상태 갱신| S0
+   A -->|설정 변경 시 저장| SP
    S0 -->|상태 조회| V
 
    A -->|키 입력 및 리사이징| T
@@ -134,9 +138,17 @@ RDP/VNC 세션에서 수신한 픽셀 데이터를 화면에 표시하기 위한
 ### 5) 앱 오케스트레이션: `main.rs` + `app/*` + `ui/*`
 - `main.rs`는 Iced application 부트스트랩과 공용 상수/로깅 초기화만 담당합니다.
 - `app/state.rs`/`app/message.rs`/`app/model.rs`가 앱 상태/메시지/세션 모델을 정의합니다.
+- `app/settings_persistence.rs`가 설정 스냅샷(`SettingsData`)을 JSON으로 로드/저장합니다.
 - `app/update.rs`가 세션 ID 기반 라우팅, 연결/입력/윈도우 메시지 처리, 백엔드 송신을 담당합니다.
 - `ui/view.rs`가 Welcome/탭/원격디스플레이/설정 UI 렌더링을 담당하며, `app/subscription.rs`가 이벤트 수집을 담당합니다.
 - Welcome 탭의 로컬 셸 목록은 `app/local_shell.rs` 탐지 결과를 사용합니다.
+
+### 6) 설정 영속화 계층: `app/settings_persistence.rs`
+- 저장 파일: 실행 파일 기준 경로의 `kterm_settings.json`
+- 저장 정책: 기본값과 **다른 값만** 직렬화(`serde`의 `skip_serializing_if`)하여 파일 크기와 diff 노이즈를 최소화합니다.
+- 로드 정책: 앱 시작 시 `main.rs` 초기화 클로저에서 `State::default()` 생성 후 로드 값을 `apply_to()`로 덮어씁니다.
+- 저장 트리거: `Message::ToggleSettingsCheckbox`, `Message::SettingsTextChanged` 처리 시점에 즉시 저장합니다.
+- 장애 허용: 파일 미존재/파싱 실패/쓰기 실패 시 경고 로그만 남기고 기본값으로 계속 동작합니다.
 
 ---
 
@@ -224,6 +236,34 @@ RDP/VNC 세션에서 수신한 픽셀 데이터를 화면에 표시하기 위한
    │
    ▼
 [remote_display/renderer.rs] Dirty Rect 기반 부분 업로드 -> 화면 출력
+```
+
+**[Settings — UI/영속화 경로]**
+```text
+[사용자: Settings 탭에서 토글/텍스트 변경]
+   │
+   ▼
+[ui/settings.rs] Message::ToggleSettingsCheckbox / Message::SettingsTextChanged 발행
+   │
+   ▼
+[app/update.rs] State 갱신 + settings_persistence::save_settings(state) 호출
+   │
+   ▼
+[app/settings_persistence.rs] SettingsData 변환 -> 기본값과 다른 필드만 JSON 직렬화
+   │
+   ▼
+[kterm_settings.json] 실행 파일 옆 파일에 저장
+
+[앱 시작]
+   │
+   ▼
+[main.rs] State::default() 생성
+   │
+   ▼
+[app/settings_persistence.rs] load_settings() + apply_to(&mut state)
+   │
+   ▼
+[초기 UI/연결 기본값] 저장된 설정값으로 시작
 ```
 
 참고:
