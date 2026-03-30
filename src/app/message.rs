@@ -5,7 +5,7 @@ use iced::window;
 
 use crate::connection;
 
-use super::model::{ProtocolMode, SettingsTabKind, SettingsToggleKey};
+use super::model::{ProtocolMode, SettingsTabKind, SettingsTextKey, SettingsToggleKey};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -73,4 +73,5 @@ pub enum Message {
     OpenSettingsTab(SettingsTabKind),
     SettingsCategorySelected(usize),
     ToggleSettingsCheckbox(SettingsToggleKey),
+    SettingsTextChanged(SettingsTextKey, String),
 }

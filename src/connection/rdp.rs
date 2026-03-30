@@ -63,12 +63,17 @@ pub fn connect_and_subscribe(
     height: u16,
     cliprdr_factory: Option<Box<dyn CliprdrBackendFactory + Send>>,
     clipboard_rx: Option<mpsc::UnboundedReceiver<ClipboardMessage>>,
+    enable_credssp: bool,
+    enable_audio: bool,
+    color_depth: u32,
+    font_smoothing: bool,
+    desktop_composition: bool,
 ) -> futures::stream::BoxStream<'static, ConnectionEvent> {
     let (tx_to_rdp, rx_from_iced) = mpsc::unbounded_channel::<ConnectionInput>();
     let (tx_from_worker, rx_from_worker) = mpsc::unbounded_channel::<ConnectionEvent>();
 
     tokio::spawn(async move {
-        run_rdp_worker(host, port, username, password, width, height, rx_from_iced, tx_from_worker, tx_to_rdp, cliprdr_factory, clipboard_rx).await;
+        run_rdp_worker(host, port, username, password, width, height, rx_from_iced, tx_from_worker, tx_to_rdp, cliprdr_factory, clipboard_rx, enable_credssp, enable_audio, color_depth, font_smoothing, desktop_composition).await;
     });
 
     // Batch consecutive Frames events to reduce Handle rebuilds on the UI side.
@@ -122,9 +127,14 @@ async fn run_rdp_worker(
     tx_to_rdp: mpsc::UnboundedSender<ConnectionInput>,
     cliprdr_factory: Option<Box<dyn CliprdrBackendFactory + Send>>,
     clipboard_rx: Option<mpsc::UnboundedReceiver<ClipboardMessage>>,
+    enable_credssp: bool,
+    enable_audio: bool,
+    color_depth: u32,
+    font_smoothing: bool,
+    desktop_composition: bool,
 ) {
     let tx_err = tx_from_worker.clone();
-    if let Err(err) = run_rdp_worker_inner(host, port, username, password, width, height, rx_from_iced, tx_from_worker, tx_to_rdp, cliprdr_factory, clipboard_rx).await {
+    if let Err(err) = run_rdp_worker_inner(host, port, username, password, width, height, rx_from_iced, tx_from_worker, tx_to_rdp, cliprdr_factory, clipboard_rx, enable_credssp, enable_audio, color_depth, font_smoothing, desktop_composition).await {
         let _ = tx_err.send(ConnectionEvent::Error(err));
     }
 }
@@ -141,6 +151,11 @@ async fn run_rdp_worker_inner(
     tx_to_rdp: mpsc::UnboundedSender<ConnectionInput>,
     cliprdr_factory: Option<Box<dyn CliprdrBackendFactory + Send>>,
     mut clipboard_rx: Option<mpsc::UnboundedReceiver<ClipboardMessage>>,
+    enable_credssp: bool,
+    enable_audio: bool,
+    color_depth: u32,
+    font_smoothing: bool,
+    desktop_composition: bool,
 ) -> Result<(), String> {
     // --- PDU trace log -------------------------------------------------------
     // Log handshake sequencing plus every runtime Action so protocol behavior
@@ -152,7 +167,7 @@ async fn run_rdp_worker_inner(
     writeln!(pdu_log, "\n=== RDP session start  host={host} ===")
         .map_err(|e| format!("pdu_log write: {}", e))?;
 
-    let config = build_config(username, password, None, width, height);
+    let config = build_config(username, password, None, width, height, enable_credssp, enable_audio, color_depth, font_smoothing, desktop_composition);
     let (gfx_frame_tx, mut gfx_frame_rx) = mpsc::unbounded_channel::<Vec<crate::remote_display::FrameUpdate>>();
     let (connection_result, mut framed) = connect(config, host.clone(), port, gfx_frame_tx, cliprdr_factory).await?;
 
@@ -1145,12 +1160,20 @@ async fn connect(
     Ok((connection_result, upgraded_framed))
 }
 
-fn build_config(username: String, password: String, domain: Option<String>, width: u16, height: u16) -> connector::Config {
+fn build_config(username: String, password: String, domain: Option<String>, width: u16, height: u16, enable_credssp: bool, enable_audio: bool, color_depth: u32, font_smoothing: bool, desktop_composition: bool) -> connector::Config {
+    let mut perf_flags = PerformanceFlags::empty();
+    if font_smoothing {
+        perf_flags |= PerformanceFlags::ENABLE_FONT_SMOOTHING;
+    }
+    if desktop_composition {
+        perf_flags |= PerformanceFlags::ENABLE_DESKTOP_COMPOSITION;
+    }
+
     connector::Config {
         credentials: Credentials::UsernamePassword { username, password },
         domain,
         enable_tls: true,
-        enable_credssp: true,
+        enable_credssp,
         keyboard_type: KeyboardType::IbmEnhanced,
         keyboard_subtype: 0,
         keyboard_layout: 0,
@@ -1163,7 +1186,7 @@ fn build_config(username: String, password: String, domain: Option<String>, widt
         },
         bitmap: Some(BitmapConfig {
             lossy_compression: false,
-            color_depth: 32,
+            color_depth,
             codecs: BitmapCodecs(vec![
                 Codec {
                     id: 3, // CODEC_ID_REMOTEFX
@@ -1203,10 +1226,9 @@ fn build_config(username: String, password: String, domain: Option<String>, widt
         enable_server_pointer: false,
         request_data: None,
         autologon: false,
-        enable_audio_playback: true,
+        enable_audio_playback: enable_audio,
         pointer_software_rendering: true,
-        performance_flags: PerformanceFlags::ENABLE_FONT_SMOOTHING
-            | PerformanceFlags::ENABLE_DESKTOP_COMPOSITION,
+        performance_flags: perf_flags,
         desktop_scale_factor: 0,
         hardware_id: None,
         license_cache: None,

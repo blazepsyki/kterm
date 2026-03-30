@@ -5,11 +5,49 @@ use tokio_serial::SerialPortBuilderExt;
 
 use crate::connection::{ConnectionEvent, ConnectionInput};
 
+fn parse_data_bits(s: &str) -> tokio_serial::DataBits {
+    match s.trim() {
+        "5" => tokio_serial::DataBits::Five,
+        "6" => tokio_serial::DataBits::Six,
+        "7" => tokio_serial::DataBits::Seven,
+        _ => tokio_serial::DataBits::Eight,
+    }
+}
+
+fn parse_stop_bits(s: &str) -> tokio_serial::StopBits {
+    match s.trim() {
+        "2" => tokio_serial::StopBits::Two,
+        _ => tokio_serial::StopBits::One,
+    }
+}
+
+fn parse_parity(s: &str) -> tokio_serial::Parity {
+    match s.trim().to_lowercase().as_str() {
+        "odd" => tokio_serial::Parity::Odd,
+        "even" => tokio_serial::Parity::Even,
+        _ => tokio_serial::Parity::None,
+    }
+}
+
 pub fn connect_and_subscribe(
     port_name: String,
     baud_rate: u32,
+    data_bits: String,
+    stop_bits: String,
+    parity: String,
+    hw_flow_control: bool,
 ) -> futures::stream::BoxStream<'static, ConnectionEvent> {
     let (tx_to_serial, rx_from_iced) = mpsc::unbounded_channel::<ConnectionInput>();
+
+    // Parse serial parameters before the closure so only Copy types are captured
+    let db = parse_data_bits(&data_bits);
+    let sb = parse_stop_bits(&stop_bits);
+    let par = parse_parity(&parity);
+    let fc = if hw_flow_control {
+        tokio_serial::FlowControl::Hardware
+    } else {
+        tokio_serial::FlowControl::None
+    };
 
     // State: (port_halves, port_name, baud_rate, tx_to_serial, rx_from_iced)
     type PortHalves = (
@@ -21,9 +59,13 @@ pub fn connect_and_subscribe(
 
     futures::stream::unfold(
         initial_state,
-        |(state_opt, port_name, baud_rate, tx_to_serial, mut rx_from_iced)| async move {
+        move |(state_opt, port_name, baud_rate, tx_to_serial, mut rx_from_iced)| async move {
             if state_opt.is_none() {
                 let port_result = tokio_serial::new(port_name.clone(), baud_rate)
+                    .data_bits(db)
+                    .stop_bits(sb)
+                    .parity(par)
+                    .flow_control(fc)
                     .open_native_async();
 
                 match port_result {

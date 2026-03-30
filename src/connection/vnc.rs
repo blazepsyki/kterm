@@ -16,7 +16,6 @@ use super::{
 };
 use crate::remote_display::FrameUpdate;
 
-const VNC_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const VNC_REFRESH_INTERVAL: Duration = Duration::from_millis(16);
 const VNC_AUTH_PASSWORD_LIMIT: usize = 8;
 const VNC_CONSERVATIVE_FULL_UPLOAD: bool = false;
@@ -82,12 +81,16 @@ pub fn connect_and_subscribe(
     host: String,
     port: u16,
     password: Option<String>,
+    remote_cursor: bool,
+    shared_session: bool,
+    view_only: bool,
+    timeout_secs: u64,
 ) -> futures::stream::BoxStream<'static, ConnectionEvent> {
     let (tx_to_vnc, rx_from_iced) = mpsc::unbounded_channel::<ConnectionInput>();
     let (tx_from_worker, rx_from_worker) = mpsc::unbounded_channel::<ConnectionEvent>();
 
     tokio::spawn(async move {
-        run_vnc_worker(host, port, password, rx_from_iced, tx_from_worker, tx_to_vnc).await;
+        run_vnc_worker(host, port, password, rx_from_iced, tx_from_worker, tx_to_vnc, remote_cursor, shared_session, view_only, timeout_secs).await;
     });
 
     // Merge consecutive frame batches to reduce UI handle churn.
@@ -136,9 +139,13 @@ async fn run_vnc_worker(
     rx_from_iced: mpsc::UnboundedReceiver<ConnectionInput>,
     tx_from_worker: mpsc::UnboundedSender<ConnectionEvent>,
     tx_to_vnc: mpsc::UnboundedSender<ConnectionInput>,
+    remote_cursor: bool,
+    shared_session: bool,
+    view_only: bool,
+    timeout_secs: u64,
 ) {
     let tx_err = tx_from_worker.clone();
-    if let Err(err) = run_vnc_worker_inner(host, port, password, rx_from_iced, tx_from_worker, tx_to_vnc).await {
+    if let Err(err) = run_vnc_worker_inner(host, port, password, rx_from_iced, tx_from_worker, tx_to_vnc, remote_cursor, shared_session, view_only, timeout_secs).await {
         let _ = tx_err.send(ConnectionEvent::Error(err));
     }
 }
@@ -150,18 +157,24 @@ async fn run_vnc_worker_inner(
     mut rx_from_iced: mpsc::UnboundedReceiver<ConnectionInput>,
     tx_from_worker: mpsc::UnboundedSender<ConnectionEvent>,
     tx_to_vnc: mpsc::UnboundedSender<ConnectionInput>,
+    remote_cursor: bool,
+    shared_session: bool,
+    view_only: bool,
+    timeout_secs: u64,
 ) -> Result<(), String> {
     info!("[VNC] connecting to {}:{}", host, port);
 
+    let connect_timeout = Duration::from_secs(timeout_secs.max(1));
+
     let tcp = tokio::time::timeout(
-        VNC_CONNECT_TIMEOUT,
+        connect_timeout,
         tokio::net::TcpStream::connect((host.as_str(), port)),
     )
     .await
     .map_err(|_| {
         format!(
             "VNC TCP connect timed out after {}s",
-            VNC_CONNECT_TIMEOUT.as_secs()
+            connect_timeout.as_secs()
         )
     })?
     .map_err(|e| format!("VNC TCP connect failed: {}", e))?;
@@ -177,14 +190,19 @@ async fn run_vnc_worker_inner(
         ));
     }
 
-    let vnc = VncConnector::new(tcp)
+    let mut vnc_builder = VncConnector::new(tcp)
         .set_auth_method(async move { Ok::<String, VncError>(auth_password) })
         .set_pixel_format(PixelFormat::rgba())
-        .allow_shared(true)
+        .allow_shared(shared_session)
         .add_encoding(VncEncoding::CopyRect)
         .add_encoding(VncEncoding::Raw)
-        .add_encoding(VncEncoding::DesktopSizePseudo)
-        .add_encoding(VncEncoding::CursorPseudo)
+        .add_encoding(VncEncoding::DesktopSizePseudo);
+
+    if remote_cursor {
+        vnc_builder = vnc_builder.add_encoding(VncEncoding::CursorPseudo);
+    }
+
+    let vnc = vnc_builder
         .build()
         .map_err(|e| format!("VNC connector build failed: {}", e))?
         .try_start()
@@ -195,9 +213,15 @@ async fn run_vnc_worker_inner(
 
     let _ = tx_from_worker.send(ConnectionEvent::Connected(tx_to_vnc));
 
+    let encodings_desc = if remote_cursor {
+        "CopyRect, Raw, DesktopSize, CursorPseudo"
+    } else {
+        "CopyRect, Raw, DesktopSize"
+    };
     let summary = format!(
-        "\r\n[VNC] Connected: {}:{} (encodings: CopyRect, Raw, DesktopSize, CursorPseudo)\r\n",
-        host, port
+        "\r\n[VNC] Connected: {}:{} (encodings: {}{})\r\n",
+        host, port, encodings_desc,
+        if view_only { ", view-only" } else { "" },
     );
     let _ = tx_from_worker.send(ConnectionEvent::Data(summary.into_bytes()));
 
@@ -221,17 +245,24 @@ async fn run_vnc_worker_inner(
             input = rx_from_iced.recv() => {
                 match input {
                     Some(input) => {
-                        handle_connection_input(
-                            &vnc,
-                            &tx_from_worker,
-                            &framebuffer,
-                            &mut cursor,
-                            &mut pointer,
-                            &mut remote_lock_state,
-                            &mut key_state,
-                            input,
-                        )
-                        .await?
+                        // In view-only mode, suppress keyboard/mouse input
+                        let should_skip = view_only && matches!(
+                            &input,
+                            ConnectionInput::RemoteInput(_) | ConnectionInput::Data(_)
+                        );
+                        if !should_skip {
+                            handle_connection_input(
+                                &vnc,
+                                &tx_from_worker,
+                                &framebuffer,
+                                &mut cursor,
+                                &mut pointer,
+                                &mut remote_lock_state,
+                                &mut key_state,
+                                input,
+                            )
+                            .await?;
+                        }
                     }
                     None => {
                         info!("[VNC] input channel closed; closing session");

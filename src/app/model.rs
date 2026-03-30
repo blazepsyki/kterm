@@ -44,8 +44,28 @@ pub enum SettingsToggleKey {
     HardwareFlowControl,
     LaunchInLoginMode,
     RdpNla,
+    RdpEnableAudio,
+    RdpFontSmoothing,
+    RdpDesktopComposition,
     VncRemoteCursor,
+    VncSharedSession,
+    VncViewOnly,
     CompactTabStyle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTextKey {
+    CommonTimeout,
+    SshKeepAliveInterval,
+    SshTerminalType,
+    TelnetLineEnding,
+    SerialDataBits,
+    SerialStopBits,
+    SerialParity,
+    LocalDefaultShell,
+    LocalStartupArgs,
+    RdpColorDepth,
+    VncTimeout,
 }
 
 #[derive(Debug, Clone)]

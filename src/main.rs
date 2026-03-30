@@ -115,7 +115,10 @@ pub fn main() -> iced::Result {
                 iced::font::load(include_bytes!("../assets/fonts/D2Coding.ttf")).map(Message::FontLoaded);
             let win_id_task = window::oldest()
                 .map(|opt_id| Message::WindowIdCaptured(opt_id.expect("No window found")));
-            (State::default(), Task::batch(vec![font_task, win_id_task]))
+            let mut state = State::default();
+            let saved = app::settings_persistence::load_settings();
+            saved.apply_to(&mut state);
+            (state, Task::batch(vec![font_task, win_id_task]))
         },
         app::update::update,
         ui::view::view,

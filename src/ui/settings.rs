@@ -3,7 +3,7 @@
 use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
 use iced::{Background, Color, Element, Font, Length, font::Weight};
 
-use crate::app::{Message, SettingsTabKind, SettingsToggleKey, State};
+use crate::app::{Message, SettingsTabKind, SettingsTextKey, SettingsToggleKey, State};
 
 fn get_settings_categories(tab_kind: SettingsTabKind) -> Vec<&'static str> {
     match tab_kind {
@@ -78,11 +78,46 @@ pub fn render_settings_sidebar(
     .into()
 }
 
-fn setting_row(label: &'static str, placeholder: &'static str) -> Element<'static, Message> {
+fn setting_text_row(
+    label: &'static str,
+    description: &'static str,
+    value: String,
+    key: SettingsTextKey,
+) -> Element<'static, Message> {
     row![
         column![
             text(label).size(13),
-            text("Placeholder")
+            text(description)
+                .size(11)
+                .color(Color::from_rgb(0.58, 0.58, 0.58)),
+        ]
+        .spacing(2)
+        .width(Length::Fill),
+        container(
+            text_input("", &value)
+                .on_input(move |v| Message::SettingsTextChanged(key, v))
+                .padding([6, 10])
+                .width(Length::Fixed(240.0))
+        )
+        .style(|_| container::Style {
+            background: Some(Background::Color(Color::from_rgb(0.10, 0.10, 0.10))),
+            border: iced::Border {
+                width: 1.0,
+                color: Color::from_rgb(0.24, 0.24, 0.24),
+                radius: 6.0.into(),
+            },
+            ..Default::default()
+        })
+    ]
+    .align_y(iced::Alignment::Center)
+    .into()
+}
+
+fn setting_row_readonly(label: &'static str, placeholder: &'static str) -> Element<'static, Message> {
+    row![
+        column![
+            text(label).size(13),
+            text("Not yet configurable")
                 .size(11)
                 .color(Color::from_rgb(0.58, 0.58, 0.58)),
         ]
@@ -109,31 +144,31 @@ fn setting_row(label: &'static str, placeholder: &'static str) -> Element<'stati
 
 fn checkbox_placeholder_row(
     label: &'static str,
+    description: &'static str,
     key: SettingsToggleKey,
     checked: bool,
 ) -> Element<'static, Message> {
-    let check_label = if checked { "[x]" } else { "[ ]" };
     let status_label = if checked { "ON" } else { "OFF" };
 
     row![
         column![
             text(label).size(13),
-            text("Checkbox Placeholder")
+            text(description)
                 .size(11)
                 .color(Color::from_rgb(0.58, 0.58, 0.58)),
         ]
         .spacing(2)
         .width(Length::Fill),
         button(
-            row![
-                text(check_label).size(12),
+            container(
                 text(status_label).size(12).font(Font {
                     weight: Weight::Bold,
                     ..Default::default()
-                }),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center)
+                })
+            )
+            .width(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
         )
         .width(Length::Fixed(90.0))
         .padding([6, 8])
@@ -162,6 +197,285 @@ fn checkbox_placeholder_row(
     .into()
 }
 
+fn setting_text_value_row(
+    state: &State,
+    label: &'static str,
+    description: &'static str,
+    key: SettingsTextKey,
+) -> Element<'static, Message> {
+    setting_text_row(
+        label,
+        description,
+        state.settings_text_value(key).to_owned(),
+        key,
+    )
+}
+
+fn setting_toggle_row(
+    state: &State,
+    label: &'static str,
+    description: &'static str,
+    key: SettingsToggleKey,
+) -> Element<'static, Message> {
+    checkbox_placeholder_row(label, description, key, state.settings_checkbox_value(key))
+}
+
+fn settings_section(
+    title: String,
+    subtitle: &'static str,
+    rows: Vec<Element<'static, Message>>,
+) -> Element<'static, Message> {
+    let mut section = column![
+        text(title).size(18).font(Font {
+            weight: Weight::Bold,
+            ..Default::default()
+        }),
+        text(subtitle)
+            .size(12)
+            .color(Color::from_rgb(0.65, 0.65, 0.65)),
+        Space::new().height(Length::Fixed(10.0)),
+    ]
+    .spacing(14);
+
+    for row in rows {
+        section = section.push(row);
+    }
+
+    section.into()
+}
+
+fn render_common_settings(state: &State, title: String) -> Element<'static, Message> {
+    settings_section(
+        title,
+        "Adjust application-wide behavior.",
+        vec![
+            setting_text_value_row(
+                state,
+                "Connection Timeout (sec)",
+                "TCP connect timeout in seconds",
+                SettingsTextKey::CommonTimeout,
+            ),
+            setting_toggle_row(
+                state,
+                "Auto-reconnect",
+                "Reconnect automatically when the session disconnects",
+                SettingsToggleKey::AutoReconnect,
+            ),
+        ],
+    )
+}
+
+fn render_ssh_settings(state: &State, title: String) -> Element<'static, Message> {
+    settings_section(
+        title,
+        "Configure SSH connection options.",
+        vec![
+            setting_text_value_row(
+                state,
+                "Keep Alive Interval (sec)",
+                "Seconds between keepalive packets (0 = disabled)",
+                SettingsTextKey::SshKeepAliveInterval,
+            ),
+            setting_text_value_row(
+                state,
+                "Terminal Type",
+                "PTY terminal type string for remote shell",
+                SettingsTextKey::SshTerminalType,
+            ),
+            setting_toggle_row(
+                state,
+                "Use Agent Forwarding",
+                "Forward your local SSH agent to the remote host",
+                SettingsToggleKey::UseAgentForwarding,
+            ),
+        ],
+    )
+}
+
+fn render_telnet_settings(state: &State, title: String) -> Element<'static, Message> {
+    settings_section(
+        title,
+        "Configure Telnet connection options.",
+        vec![
+            setting_text_value_row(
+                state,
+                "Line Ending",
+                "Outgoing line ending: CRLF, CR, or LF",
+                SettingsTextKey::TelnetLineEnding,
+            ),
+            setting_toggle_row(
+                state,
+                "Echo Locally",
+                "Show typed characters locally before server echo",
+                SettingsToggleKey::EchoLocally,
+            ),
+        ],
+    )
+}
+
+fn render_serial_settings(state: &State, title: String) -> Element<'static, Message> {
+    settings_section(
+        title,
+        "Configure serial port parameters.",
+        vec![
+            setting_text_value_row(
+                state,
+                "Data Bits",
+                "Number of data bits: 5, 6, 7, 8",
+                SettingsTextKey::SerialDataBits,
+            ),
+            setting_text_value_row(
+                state,
+                "Stop Bits",
+                "Number of stop bits: 1, 2",
+                SettingsTextKey::SerialStopBits,
+            ),
+            setting_text_value_row(
+                state,
+                "Parity",
+                "Parity check: None, Odd, Even",
+                SettingsTextKey::SerialParity,
+            ),
+            setting_toggle_row(
+                state,
+                "Hardware Flow Control",
+                "Use RTS/CTS hardware flow control",
+                SettingsToggleKey::HardwareFlowControl,
+            ),
+        ],
+    )
+}
+
+fn render_local_shell_settings(state: &State, title: String) -> Element<'static, Message> {
+    settings_section(
+        title,
+        "Configure local shell launch behavior.",
+        vec![
+            setting_text_value_row(
+                state,
+                "Default Shell",
+                "Path to shell executable (empty = auto-detect)",
+                SettingsTextKey::LocalDefaultShell,
+            ),
+            setting_text_value_row(
+                state,
+                "Startup Arguments",
+                "Extra arguments passed to shell",
+                SettingsTextKey::LocalStartupArgs,
+            ),
+            setting_toggle_row(
+                state,
+                "Launch In Login Mode",
+                "Start the shell as a login shell when supported",
+                SettingsToggleKey::LaunchInLoginMode,
+            ),
+        ],
+    )
+}
+
+fn render_rdp_settings(state: &State, title: String) -> Element<'static, Message> {
+    settings_section(
+        title,
+        "Configure Remote Desktop Protocol options.",
+        vec![
+            setting_text_value_row(
+                state,
+                "Color Depth (bpp)",
+                "Bits per pixel: 16, 24, 32",
+                SettingsTextKey::RdpColorDepth,
+            ),
+            setting_toggle_row(
+                state,
+                "NLA (Network Level Auth)",
+                "Use CredSSP / NLA during authentication",
+                SettingsToggleKey::RdpNla,
+            ),
+            setting_toggle_row(
+                state,
+                "Enable Audio Playback",
+                "Play remote session audio on this machine",
+                SettingsToggleKey::RdpEnableAudio,
+            ),
+            setting_toggle_row(
+                state,
+                "Font Smoothing",
+                "Request ClearType/font smoothing in the remote session",
+                SettingsToggleKey::RdpFontSmoothing,
+            ),
+            setting_toggle_row(
+                state,
+                "Desktop Composition",
+                "Enable desktop composition effects when available",
+                SettingsToggleKey::RdpDesktopComposition,
+            ),
+        ],
+    )
+}
+
+fn render_vnc_settings(state: &State, title: String) -> Element<'static, Message> {
+    settings_section(
+        title,
+        "Configure VNC connection options.",
+        vec![
+            setting_text_value_row(
+                state,
+                "Connection Timeout (sec)",
+                "TCP connect timeout in seconds",
+                SettingsTextKey::VncTimeout,
+            ),
+            setting_toggle_row(
+                state,
+                "Remote Cursor",
+                "Use server-provided cursor shape updates",
+                SettingsToggleKey::VncRemoteCursor,
+            ),
+            setting_toggle_row(
+                state,
+                "Shared Session",
+                "Allow sharing the same VNC desktop with other clients",
+                SettingsToggleKey::VncSharedSession,
+            ),
+            setting_toggle_row(
+                state,
+                "View Only",
+                "Disable keyboard and mouse input to the remote host",
+                SettingsToggleKey::VncViewOnly,
+            ),
+        ],
+    )
+}
+
+fn render_theme_settings(state: &State, title: String) -> Element<'static, Message> {
+    settings_section(
+        title,
+        "Theme options placeholder.",
+        vec![
+            setting_row_readonly("Color Theme", "dark"),
+            setting_row_readonly("Terminal Font Family", "D2Coding"),
+            setting_toggle_row(
+                state,
+                "Use Compact Tab Style",
+                "Use denser spacing for the tab strip",
+                SettingsToggleKey::CompactTabStyle,
+            ),
+        ],
+    )
+}
+
+fn render_unknown_settings(title: String) -> Element<'static, Message> {
+    column![
+        text(title).size(18).font(Font {
+            weight: Weight::Bold,
+            ..Default::default()
+        }),
+        text("No settings available.")
+            .size(12)
+            .color(Color::from_rgb(0.65, 0.65, 0.65)),
+    ]
+    .spacing(14)
+    .into()
+}
+
 pub fn render_settings_panel(
     state: &State,
     tab_kind: SettingsTabKind,
@@ -175,170 +489,16 @@ pub fn render_settings_panel(
         SettingsTabKind::Theme => "Theme Settings".to_string(),
     };
 
-    let content: Element<'_, Message> = match (tab_kind, category_name) {
-        (SettingsTabKind::Preferences, "Common") => column![
-            text(title).size(18).font(Font {
-                weight: Weight::Bold,
-                ..Default::default()
-            }),
-            text("Adjust application-wide behavior.")
-                .size(12)
-                .color(Color::from_rgb(0.65, 0.65, 0.65)),
-            Space::new().height(Length::Fixed(10.0)),
-            setting_row("Default Connection Profile", "placeholder-default-profile"),
-            checkbox_placeholder_row(
-                "Auto-reconnect",
-                SettingsToggleKey::AutoReconnect,
-                state.settings_checkbox_value(SettingsToggleKey::AutoReconnect)
-            ),
-            setting_row("Global Timeout", "placeholder-timeout-ms"),
-        ]
-        .spacing(14)
-        .into(),
-        (SettingsTabKind::Preferences, "SSH") => column![
-            text(title).size(18).font(Font {
-                weight: Weight::Bold,
-                ..Default::default()
-            }),
-            text("Configure SSH behavior.")
-                .size(12)
-                .color(Color::from_rgb(0.65, 0.65, 0.65)),
-            Space::new().height(Length::Fixed(10.0)),
-            setting_row("Host Key Policy", "placeholder-strict-checking"),
-            setting_row("Keep Alive Interval", "placeholder-interval-sec"),
-            checkbox_placeholder_row(
-                "Use Agent Forwarding",
-                SettingsToggleKey::UseAgentForwarding,
-                state.settings_checkbox_value(SettingsToggleKey::UseAgentForwarding)
-            ),
-        ]
-        .spacing(14)
-        .into(),
-        (SettingsTabKind::Preferences, "Telnet") => column![
-            text(title).size(18).font(Font {
-                weight: Weight::Bold,
-                ..Default::default()
-            }),
-            text("Configure Telnet behavior.")
-                .size(12)
-                .color(Color::from_rgb(0.65, 0.65, 0.65)),
-            Space::new().height(Length::Fixed(10.0)),
-            setting_row("Negotiation Mode", "placeholder-auto"),
-            setting_row("Line Ending", "placeholder-CRLF"),
-            checkbox_placeholder_row(
-                "Echo Locally",
-                SettingsToggleKey::EchoLocally,
-                state.settings_checkbox_value(SettingsToggleKey::EchoLocally)
-            ),
-        ]
-        .spacing(14)
-        .into(),
-        (SettingsTabKind::Preferences, "Serial") => column![
-            text(title).size(18).font(Font {
-                weight: Weight::Bold,
-                ..Default::default()
-            }),
-            text("Configure Serial behavior.")
-                .size(12)
-                .color(Color::from_rgb(0.65, 0.65, 0.65)),
-            Space::new().height(Length::Fixed(10.0)),
-            setting_row("Default Baud Rate", "placeholder-115200"),
-            setting_row("Parity", "placeholder-none"),
-            checkbox_placeholder_row(
-                "Hardware Flow Control",
-                SettingsToggleKey::HardwareFlowControl,
-                state.settings_checkbox_value(SettingsToggleKey::HardwareFlowControl)
-            ),
-        ]
-        .spacing(14)
-        .into(),
-        (SettingsTabKind::Preferences, "Local Shell") => column![
-            text(title).size(18).font(Font {
-                weight: Weight::Bold,
-                ..Default::default()
-            }),
-            text("Configure local shell launch behavior.")
-                .size(12)
-                .color(Color::from_rgb(0.65, 0.65, 0.65)),
-            Space::new().height(Length::Fixed(10.0)),
-            setting_row("Default Shell", "placeholder-pwsh"),
-            setting_row("Startup Args", "placeholder-no-logo"),
-            checkbox_placeholder_row(
-                "Launch In Login Mode",
-                SettingsToggleKey::LaunchInLoginMode,
-                state.settings_checkbox_value(SettingsToggleKey::LaunchInLoginMode)
-            ),
-        ]
-        .spacing(14)
-        .into(),
-        (SettingsTabKind::Preferences, "RDP") => column![
-            text(title).size(18).font(Font {
-                weight: Weight::Bold,
-                ..Default::default()
-            }),
-            text("Configure RDP behavior.")
-                .size(12)
-                .color(Color::from_rgb(0.65, 0.65, 0.65)),
-            Space::new().height(Length::Fixed(10.0)),
-            setting_row("Default Resolution", "placeholder-1280x720"),
-            setting_row("Color Depth", "placeholder-32bit"),
-            checkbox_placeholder_row(
-                "NLA",
-                SettingsToggleKey::RdpNla,
-                state.settings_checkbox_value(SettingsToggleKey::RdpNla)
-            ),
-        ]
-        .spacing(14)
-        .into(),
-        (SettingsTabKind::Preferences, "VNC") => column![
-            text(title).size(18).font(Font {
-                weight: Weight::Bold,
-                ..Default::default()
-            }),
-            text("Configure VNC behavior.")
-                .size(12)
-                .color(Color::from_rgb(0.65, 0.65, 0.65)),
-            Space::new().height(Length::Fixed(10.0)),
-            setting_row("Encoding", "placeholder-tight"),
-            setting_row("Compression", "placeholder-medium"),
-            checkbox_placeholder_row(
-                "Remote Cursor",
-                SettingsToggleKey::VncRemoteCursor,
-                state.settings_checkbox_value(SettingsToggleKey::VncRemoteCursor)
-            ),
-        ]
-        .spacing(14)
-        .into(),
-        (SettingsTabKind::Theme, "Theme") => column![
-            text(title).size(18).font(Font {
-                weight: Weight::Bold,
-                ..Default::default()
-            }),
-            text("Theme options placeholder.")
-                .size(12)
-                .color(Color::from_rgb(0.65, 0.65, 0.65)),
-            Space::new().height(Length::Fixed(10.0)),
-            setting_row("Color Theme", "placeholder-dark"),
-            setting_row("Terminal Font Family", "placeholder-d2coding"),
-            checkbox_placeholder_row(
-                "Use Compact Tab Style",
-                SettingsToggleKey::CompactTabStyle,
-                state.settings_checkbox_value(SettingsToggleKey::CompactTabStyle)
-            ),
-        ]
-        .spacing(14)
-        .into(),
-        _ => column![
-            text(title).size(18).font(Font {
-                weight: Weight::Bold,
-                ..Default::default()
-            }),
-            text("No settings available.")
-                .size(12)
-                .color(Color::from_rgb(0.65, 0.65, 0.65)),
-        ]
-        .spacing(14)
-        .into(),
+    let content: Element<'static, Message> = match (tab_kind, category_name) {
+        (SettingsTabKind::Preferences, "Common") => render_common_settings(state, title),
+        (SettingsTabKind::Preferences, "SSH") => render_ssh_settings(state, title),
+        (SettingsTabKind::Preferences, "Telnet") => render_telnet_settings(state, title),
+        (SettingsTabKind::Preferences, "Serial") => render_serial_settings(state, title),
+        (SettingsTabKind::Preferences, "Local Shell") => render_local_shell_settings(state, title),
+        (SettingsTabKind::Preferences, "RDP") => render_rdp_settings(state, title),
+        (SettingsTabKind::Preferences, "VNC") => render_vnc_settings(state, title),
+        (SettingsTabKind::Theme, "Theme") => render_theme_settings(state, title),
+        _ => render_unknown_settings(title),
     };
 
     container(scrollable(content).height(Length::Fill))

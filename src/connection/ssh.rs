@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use std::sync::Arc;
+use std::time::Duration;
 use russh::client;
 use russh::keys::PublicKey;
 use tokio::sync::mpsc;
@@ -51,8 +52,8 @@ impl client::Handler for ClientHandler {
 
 
 enum SshState {
-    Init { host: String, port: u16, user: String, pass: String },
-    Connecting(client::Handle<ClientHandler>, mpsc::UnboundedReceiver<Vec<u8>>),
+    Init { host: String, port: u16, user: String, pass: String, keepalive: u64, terminal_type: String },
+    Connecting(client::Handle<ClientHandler>, mpsc::UnboundedReceiver<Vec<u8>>, String),
     Connected {
         session: client::Handle<ClientHandler>,
         channel: russh::Channel<client::Msg>,
@@ -67,14 +68,20 @@ pub fn connect_and_subscribe(
     port: u16,
     user: String,
     password: String,
+    keepalive: u64,
+    terminal_type: String,
 ) -> futures::stream::BoxStream<'static, ConnectionEvent> {
-    let initial_state = SshState::Init { host, port, user, pass: password };
+    let initial_state = SshState::Init { host, port, user, pass: password, keepalive, terminal_type };
 
     futures::stream::unfold(initial_state, |state| async move {
         match state {
-            SshState::Init { host, port, user, pass } => {
+            SshState::Init { host, port, user, pass, keepalive, terminal_type } => {
                 let (ssh_to_iced_tx, ssh_to_iced_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-                let config = Arc::new(client::Config::default());
+                let mut config = client::Config::default();
+                if keepalive > 0 {
+                    config.keepalive_interval = Some(Duration::from_secs(keepalive));
+                }
+                let config = Arc::new(config);
                 let handler = ClientHandler { sender: ssh_to_iced_tx };
 
                 let mut session = match client::connect(config, (host.as_str(), port), handler).await {
@@ -84,19 +91,19 @@ pub fn connect_and_subscribe(
 
                 match session.authenticate_password(user, pass).await {
                     Ok(russh::client::AuthResult::Success) => {
-                        Some((ConnectionEvent::Data(b"Authenticated...\n".to_vec()), SshState::Connecting(session, ssh_to_iced_rx)))
+                        Some((ConnectionEvent::Data(b"Authenticated...\n".to_vec()), SshState::Connecting(session, ssh_to_iced_rx, terminal_type)))
                     },
                     Ok(_) => Some((ConnectionEvent::Error("Auth failed".into()), SshState::Finished)),
                     Err(e) => Some((ConnectionEvent::Error(e.to_string()), SshState::Finished)),
                 }
             }
-            SshState::Connecting(session, ssh_to_iced_rx) => {
+            SshState::Connecting(session, ssh_to_iced_rx, terminal_type) => {
                 let channel = match session.channel_open_session().await {
                     Ok(c) => c,
                     Err(e) => return Some((ConnectionEvent::Error(e.to_string()), SshState::Finished)),
                 };
 
-                if let Err(e) = channel.request_pty(true, "xterm-256color", 80, 24, 0, 0, &[]).await {
+                if let Err(e) = channel.request_pty(true, &terminal_type, 80, 24, 0, 0, &[]).await {
                     return Some((ConnectionEvent::Error(e.to_string()), SshState::Finished));
                 }
 

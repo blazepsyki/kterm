@@ -6,7 +6,7 @@ use iced::window;
 use super::local_shell::detect_local_shells;
 
 use super::model::{
-    LocalShellOption, ProtocolMode, Session, SettingsToggleKey,
+    LocalShellOption, ProtocolMode, Session, SettingsTextKey, SettingsToggleKey,
 };
 
 pub struct State {
@@ -58,8 +58,25 @@ pub struct State {
     pub settings_serial_hardware_flow_control: bool,
     pub settings_local_launch_in_login_mode: bool,
     pub settings_rdp_nla: bool,
+    pub settings_rdp_enable_audio: bool,
+    pub settings_rdp_font_smoothing: bool,
+    pub settings_rdp_desktop_composition: bool,
     pub settings_vnc_remote_cursor: bool,
+    pub settings_vnc_shared_session: bool,
+    pub settings_vnc_view_only: bool,
     pub settings_theme_compact_tab_style: bool,
+    // Text settings
+    pub settings_common_timeout: String,
+    pub settings_ssh_keepalive: String,
+    pub settings_ssh_terminal_type: String,
+    pub settings_telnet_line_ending: String,
+    pub settings_serial_data_bits: String,
+    pub settings_serial_stop_bits: String,
+    pub settings_serial_parity: String,
+    pub settings_local_default_shell: String,
+    pub settings_local_startup_args: String,
+    pub settings_rdp_color_depth: String,
+    pub settings_vnc_timeout: String,
 }
 
 impl Default for State {
@@ -115,8 +132,25 @@ impl Default for State {
             settings_serial_hardware_flow_control: false,
             settings_local_launch_in_login_mode: true,
             settings_rdp_nla: true,
+            settings_rdp_enable_audio: true,
+            settings_rdp_font_smoothing: true,
+            settings_rdp_desktop_composition: true,
             settings_vnc_remote_cursor: true,
+            settings_vnc_shared_session: true,
+            settings_vnc_view_only: false,
             settings_theme_compact_tab_style: false,
+            // Text settings
+            settings_common_timeout: "30".to_string(),
+            settings_ssh_keepalive: "0".to_string(),
+            settings_ssh_terminal_type: "xterm-256color".to_string(),
+            settings_telnet_line_ending: "CRLF".to_string(),
+            settings_serial_data_bits: "8".to_string(),
+            settings_serial_stop_bits: "1".to_string(),
+            settings_serial_parity: "None".to_string(),
+            settings_local_default_shell: String::new(),
+            settings_local_startup_args: String::new(),
+            settings_rdp_color_depth: "32".to_string(),
+            settings_vnc_timeout: "10".to_string(),
         }
     }
 }
@@ -162,7 +196,12 @@ impl State {
             SettingsToggleKey::HardwareFlowControl => self.settings_serial_hardware_flow_control,
             SettingsToggleKey::LaunchInLoginMode => self.settings_local_launch_in_login_mode,
             SettingsToggleKey::RdpNla => self.settings_rdp_nla,
+            SettingsToggleKey::RdpEnableAudio => self.settings_rdp_enable_audio,
+            SettingsToggleKey::RdpFontSmoothing => self.settings_rdp_font_smoothing,
+            SettingsToggleKey::RdpDesktopComposition => self.settings_rdp_desktop_composition,
             SettingsToggleKey::VncRemoteCursor => self.settings_vnc_remote_cursor,
+            SettingsToggleKey::VncSharedSession => self.settings_vnc_shared_session,
+            SettingsToggleKey::VncViewOnly => self.settings_vnc_view_only,
             SettingsToggleKey::CompactTabStyle => self.settings_theme_compact_tab_style,
         }
     }
@@ -175,8 +214,45 @@ impl State {
             SettingsToggleKey::HardwareFlowControl => self.settings_serial_hardware_flow_control = !self.settings_serial_hardware_flow_control,
             SettingsToggleKey::LaunchInLoginMode => self.settings_local_launch_in_login_mode = !self.settings_local_launch_in_login_mode,
             SettingsToggleKey::RdpNla => self.settings_rdp_nla = !self.settings_rdp_nla,
+            SettingsToggleKey::RdpEnableAudio => self.settings_rdp_enable_audio = !self.settings_rdp_enable_audio,
+            SettingsToggleKey::RdpFontSmoothing => self.settings_rdp_font_smoothing = !self.settings_rdp_font_smoothing,
+            SettingsToggleKey::RdpDesktopComposition => self.settings_rdp_desktop_composition = !self.settings_rdp_desktop_composition,
             SettingsToggleKey::VncRemoteCursor => self.settings_vnc_remote_cursor = !self.settings_vnc_remote_cursor,
+            SettingsToggleKey::VncSharedSession => self.settings_vnc_shared_session = !self.settings_vnc_shared_session,
+            SettingsToggleKey::VncViewOnly => self.settings_vnc_view_only = !self.settings_vnc_view_only,
             SettingsToggleKey::CompactTabStyle => self.settings_theme_compact_tab_style = !self.settings_theme_compact_tab_style,
+        }
+    }
+
+    pub fn settings_text_value(&self, key: SettingsTextKey) -> &str {
+        match key {
+            SettingsTextKey::CommonTimeout => &self.settings_common_timeout,
+            SettingsTextKey::SshKeepAliveInterval => &self.settings_ssh_keepalive,
+            SettingsTextKey::SshTerminalType => &self.settings_ssh_terminal_type,
+            SettingsTextKey::TelnetLineEnding => &self.settings_telnet_line_ending,
+            SettingsTextKey::SerialDataBits => &self.settings_serial_data_bits,
+            SettingsTextKey::SerialStopBits => &self.settings_serial_stop_bits,
+            SettingsTextKey::SerialParity => &self.settings_serial_parity,
+            SettingsTextKey::LocalDefaultShell => &self.settings_local_default_shell,
+            SettingsTextKey::LocalStartupArgs => &self.settings_local_startup_args,
+            SettingsTextKey::RdpColorDepth => &self.settings_rdp_color_depth,
+            SettingsTextKey::VncTimeout => &self.settings_vnc_timeout,
+        }
+    }
+
+    pub fn set_settings_text(&mut self, key: SettingsTextKey, value: String) {
+        match key {
+            SettingsTextKey::CommonTimeout => self.settings_common_timeout = value,
+            SettingsTextKey::SshKeepAliveInterval => self.settings_ssh_keepalive = value,
+            SettingsTextKey::SshTerminalType => self.settings_ssh_terminal_type = value,
+            SettingsTextKey::TelnetLineEnding => self.settings_telnet_line_ending = value,
+            SettingsTextKey::SerialDataBits => self.settings_serial_data_bits = value,
+            SettingsTextKey::SerialStopBits => self.settings_serial_stop_bits = value,
+            SettingsTextKey::SerialParity => self.settings_serial_parity = value,
+            SettingsTextKey::LocalDefaultShell => self.settings_local_default_shell = value,
+            SettingsTextKey::LocalStartupArgs => self.settings_local_startup_args = value,
+            SettingsTextKey::RdpColorDepth => self.settings_rdp_color_depth = value,
+            SettingsTextKey::VncTimeout => self.settings_vnc_timeout = value,
         }
     }
 }

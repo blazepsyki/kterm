@@ -310,6 +310,8 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             let port: u16 = state.ssh_port.parse().unwrap_or(22);
             let user = state.ssh_user.clone();
             let pass = state.ssh_pass.clone();
+            let keepalive: u64 = state.settings_ssh_keepalive.parse().unwrap_or(0);
+            let terminal_type = state.settings_ssh_terminal_type.clone();
             let name = format!("SSH: {}@{}", user, host);
             let target_index = state.active_index;
             let mut target_id = None;
@@ -320,7 +322,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             if let Some(target_id) = target_id {
                 Task::run(
-                    connection::ssh::connect_and_subscribe(host, port, user, pass),
+                    connection::ssh::connect_and_subscribe(host, port, user, pass, keepalive, terminal_type),
                     move |event| Message::ConnectionMessage(target_id, event),
                 )
             } else {
@@ -349,6 +351,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::ConnectSerial => {
             let port_name = state.serial_port.clone();
             let baud: u32 = state.serial_baud.parse().unwrap_or(115200);
+            let data_bits = state.settings_serial_data_bits.clone();
+            let stop_bits = state.settings_serial_stop_bits.clone();
+            let parity = state.settings_serial_parity.clone();
+            let hw_flow = state.settings_serial_hardware_flow_control;
             let name = format!("Serial: {} ({}bps)", port_name, baud);
             let target_index = state.active_index;
             let mut target_id = None;
@@ -359,7 +365,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             if let Some(target_id) = target_id {
                 Task::run(
-                    connection::serial::connect_and_subscribe(port_name, baud),
+                    connection::serial::connect_and_subscribe(port_name, baud, data_bits, stop_bits, parity, hw_flow),
                     move |event| Message::ConnectionMessage(target_id, event),
                 )
             } else {
@@ -422,6 +428,12 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 let (cliprdr_factory, clipboard_rx_opt) =
                     platform::windows::create_cliprdr_backend(target_id);
 
+                let enable_credssp = state.settings_rdp_nla;
+                let enable_audio = state.settings_rdp_enable_audio;
+                let color_depth: u32 = state.settings_rdp_color_depth.parse().unwrap_or(32);
+                let font_smoothing = state.settings_rdp_font_smoothing;
+                let desktop_composition = state.settings_rdp_desktop_composition;
+
                 Task::run(
                     connection::rdp::connect_and_subscribe(
                         host,
@@ -432,6 +444,11 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                         height,
                         cliprdr_factory,
                         clipboard_rx_opt,
+                        enable_credssp,
+                        enable_audio,
+                        color_depth,
+                        font_smoothing,
+                        desktop_composition,
                     ),
                     move |event| Message::ConnectionMessage(target_id, event),
                 )
@@ -444,6 +461,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             let port: u16 = state.vnc_port.parse().unwrap_or(5900);
             let pass = state.vnc_pass.clone();
             let pass_opt = if pass.is_empty() { None } else { Some(pass) };
+            let remote_cursor = state.settings_vnc_remote_cursor;
+            let shared_session = state.settings_vnc_shared_session;
+            let view_only = state.settings_vnc_view_only;
+            let timeout_secs: u64 = state.settings_vnc_timeout.parse().unwrap_or(10);
             let name = format!("VNC: {}:{}", host, port);
 
             let target_index = state.active_index;
@@ -464,7 +485,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
 
             if let Some(target_id) = target_id {
                 Task::run(
-                    connection::vnc::connect_and_subscribe(host, port, pass_opt),
+                    connection::vnc::connect_and_subscribe(
+                        host, port, pass_opt,
+                        remote_cursor, shared_session, view_only, timeout_secs,
+                    ),
                     move |event| Message::ConnectionMessage(target_id, event),
                 )
             } else {
@@ -735,6 +759,12 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::ToggleSettingsCheckbox(key) => {
             state.toggle_settings_checkbox(key);
+            super::settings_persistence::save_settings(state);
+            Task::none()
+        }
+        Message::SettingsTextChanged(key, value) => {
+            state.set_settings_text(key, value);
+            super::settings_persistence::save_settings(state);
             Task::none()
         }
     }
