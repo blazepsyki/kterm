@@ -1,0 +1,58 @@
+name: Release
+
+# 파이프라인이 실행되는 조건 (트리거)
+on:
+  push:
+    tags:
+      - 'v[0-9]+.*' # v1.0.0, v0.1.1 등 'v'로 시작하는 버전 태그가 푸시될 때만 실행
+
+# Release 생성 및 파일 업로드를 위한 권한 설정
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build and Release
+    runs-on: ${{ matrix.os }}
+    
+    # 여러 OS 환경에서 병렬로 작업을 실행하기 위한 매트릭스 설정
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: kterm
+            asset_name: kterm-linux-x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: kterm
+            asset_name: kterm-macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: kterm.exe
+            asset_name: kterm-windows-x86_64.exe
+
+    steps:
+      # 1. GitHub 저장소의 코드를 가상 환경으로 가져옵니다.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Rust 컴파일러(Toolchain)를 설치합니다.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # 3. 코드를 릴리즈 모드로 컴파일합니다.
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # 4. 빌드된 실행 파일을 GitHub Releases에 업로드합니다.
+      - name: Upload binaries to release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+          name: Release ${{ github.ref_name }} # 릴리즈 제목 설정
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
