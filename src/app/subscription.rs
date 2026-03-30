@@ -15,6 +15,11 @@ pub fn subscription(state: &State) -> Subscription<Message> {
     let active_kind = state.sessions.get(state.active_index).map(|s| &s.kind);
     let is_welcome = matches!(active_kind, Some(SessionKind::Welcome));
     let is_terminal = matches!(active_kind, Some(SessionKind::Terminal));
+    let remote_supports_secure_attention = state
+        .sessions
+        .get(state.active_index)
+        .map(|session| session.is_rdp_display())
+        .unwrap_or(false);
 
     let mouse_sub = event::listen_with(|event, _status, _window| match event {
         iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
@@ -163,134 +168,163 @@ pub fn subscription(state: &State) -> Subscription<Message> {
         }
         Subscription::batch(subs)
     } else {
-        let remote_sub = event::listen_with(|event, status, _window| match event {
-            iced::Event::InputMethod(ime) => match ime {
-                input_method::Event::Commit(text) => Some(Message::ImeCommit(text)),
-                _ => None,
-            },
-            iced::Event::Keyboard(keyboard::Event::KeyPressed {
-                key,
-                text,
-                physical_key,
-                modifiers,
-                ..
-            }) => {
-                if is_remote_secure_attention_shortcut(&physical_key, modifiers) {
-                    return Some(Message::RemoteSecureAttention(true));
-                }
-
-                match route_key_pressed(&key, text.as_deref(), &physical_key) {
-                    RoutedKeyEvent::Ignore => None,
-                    RoutedKeyEvent::SyncIndicators => Some(Message::SyncRemoteKeyboardIndicators),
-                    RoutedKeyEvent::Input(input) => Some(Message::RemoteDisplayInput(input)),
-                }
-            }
-            iced::Event::Keyboard(keyboard::Event::KeyReleased {
-                key,
-                physical_key,
-                modifiers,
-                ..
-            }) => {
-                if is_remote_secure_attention_shortcut(&physical_key, modifiers)
-                    || (is_remote_secure_attention_key(&physical_key)
-                        && modifiers.control()
-                        && modifiers.alt())
-                {
-                    return Some(Message::RemoteSecureAttention(false));
-                }
-
-                match route_key_released(&key, &physical_key) {
-                    RoutedKeyEvent::Ignore => None,
-                    RoutedKeyEvent::SyncIndicators => Some(Message::SyncRemoteKeyboardIndicators),
-                    RoutedKeyEvent::Input(input) => Some(Message::RemoteDisplayInput(input)),
-                }
-            }
-            iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                Some(Message::RemoteDisplayInput(connection::RemoteInput::MouseMove {
-                    x: position.x.max(0.0).min(u16::MAX as f32) as u16,
-                    y: position.y.max(0.0).min(u16::MAX as f32) as u16,
-                }))
-            }
-            iced::Event::Mouse(mouse::Event::ButtonPressed(button))
-                if status == event::Status::Ignored =>
-            {
-                match button {
-                    mouse::Button::Left => Some(Message::RemoteDisplayInput(
-                        connection::RemoteInput::MouseButton {
-                            button: connection::RemoteMouseButton::Left,
-                            down: true,
-                        },
-                    )),
-                    mouse::Button::Right => Some(Message::RemoteDisplayInput(
-                        connection::RemoteInput::MouseButton {
-                            button: connection::RemoteMouseButton::Right,
-                            down: true,
-                        },
-                    )),
-                    mouse::Button::Middle => Some(Message::RemoteDisplayInput(
-                        connection::RemoteInput::MouseButton {
-                            button: connection::RemoteMouseButton::Middle,
-                            down: true,
-                        },
-                    )),
-                    _ => None,
-                }
-            }
-            iced::Event::Mouse(mouse::Event::ButtonReleased(button))
-                if status == event::Status::Ignored =>
-            {
-                match button {
-                    mouse::Button::Left => Some(Message::RemoteDisplayInput(
-                        connection::RemoteInput::MouseButton {
-                            button: connection::RemoteMouseButton::Left,
-                            down: false,
-                        },
-                    )),
-                    mouse::Button::Right => Some(Message::RemoteDisplayInput(
-                        connection::RemoteInput::MouseButton {
-                            button: connection::RemoteMouseButton::Right,
-                            down: false,
-                        },
-                    )),
-                    mouse::Button::Middle => Some(Message::RemoteDisplayInput(
-                        connection::RemoteInput::MouseButton {
-                            button: connection::RemoteMouseButton::Middle,
-                            down: false,
-                        },
-                    )),
-                    _ => None,
-                }
-            }
-            iced::Event::Mouse(mouse::Event::WheelScrolled { delta })
-                if status == event::Status::Ignored =>
-            {
-                let (hx, vy) = match delta {
-                    mouse::ScrollDelta::Lines { x, y } => (x, y),
-                    mouse::ScrollDelta::Pixels { x, y } => (x / 40.0, y / 40.0),
-                };
-                let vy_step = (vy * 120.0).round();
-                let hx_step = (hx * 120.0).round();
-                if vy_step != 0.0 {
-                    Some(Message::RemoteDisplayInput(connection::RemoteInput::MouseWheel {
-                        delta: vy_step.max(i16::MIN as f32).min(i16::MAX as f32) as i16,
-                    }))
-                } else if hx_step != 0.0 {
-                    Some(Message::RemoteDisplayInput(
-                        connection::RemoteInput::MouseHorizontalWheel {
-                            delta: hx_step.max(i16::MIN as f32).min(i16::MAX as f32) as i16,
-                        },
-                    ))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        });
+        let remote_sub = if remote_supports_secure_attention {
+            event::listen_with(remote_event_with_secure_attention)
+        } else {
+            event::listen_with(remote_event_without_secure_attention)
+        };
 
         let mut subs = vec![mouse_sub, menu_close_sub, remote_sub];
         if state.window_id.is_none() {
             subs.push(window::open_events().map(Message::WindowIdCaptured));
         }
         Subscription::batch(subs)
+    }
+}
+
+fn remote_event_with_secure_attention(
+    event: iced::Event,
+    status: event::Status,
+    _window: window::Id,
+) -> Option<Message> {
+    map_remote_event(event, status, true)
+}
+
+fn remote_event_without_secure_attention(
+    event: iced::Event,
+    status: event::Status,
+    _window: window::Id,
+) -> Option<Message> {
+    map_remote_event(event, status, false)
+}
+
+fn map_remote_event(
+    event: iced::Event,
+    status: event::Status,
+    secure_attention_enabled: bool,
+) -> Option<Message> {
+    match event {
+        iced::Event::InputMethod(ime) => match ime {
+            input_method::Event::Commit(text) => Some(Message::ImeCommit(text)),
+            _ => None,
+        },
+        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key,
+            text,
+            physical_key,
+            modifiers,
+            ..
+        }) => {
+            if secure_attention_enabled && is_remote_secure_attention_shortcut(&physical_key, modifiers) {
+                return Some(Message::RemoteSecureAttention(true));
+            }
+
+            match route_key_pressed(&key, text.as_deref(), &physical_key) {
+                RoutedKeyEvent::Ignore => None,
+                RoutedKeyEvent::SyncIndicators => Some(Message::SyncRemoteKeyboardIndicators),
+                RoutedKeyEvent::Input(input) => Some(Message::RemoteDisplayInput(input)),
+            }
+        }
+        iced::Event::Keyboard(keyboard::Event::KeyReleased {
+            key,
+            physical_key,
+            modifiers,
+            ..
+        }) => {
+            if secure_attention_enabled
+                && (is_remote_secure_attention_shortcut(&physical_key, modifiers)
+                    || (is_remote_secure_attention_key(&physical_key)
+                        && modifiers.control()
+                        && modifiers.alt()))
+            {
+                return Some(Message::RemoteSecureAttention(false));
+            }
+
+            match route_key_released(&key, &physical_key) {
+                RoutedKeyEvent::Ignore => None,
+                RoutedKeyEvent::SyncIndicators => Some(Message::SyncRemoteKeyboardIndicators),
+                RoutedKeyEvent::Input(input) => Some(Message::RemoteDisplayInput(input)),
+            }
+        }
+        iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
+            Some(Message::RemoteDisplayInput(connection::RemoteInput::MouseMove {
+                x: position.x.max(0.0).min(u16::MAX as f32) as u16,
+                y: position.y.max(0.0).min(u16::MAX as f32) as u16,
+            }))
+        }
+        iced::Event::Mouse(mouse::Event::ButtonPressed(button))
+            if status == event::Status::Ignored =>
+        {
+            match button {
+                mouse::Button::Left => Some(Message::RemoteDisplayInput(
+                    connection::RemoteInput::MouseButton {
+                        button: connection::RemoteMouseButton::Left,
+                        down: true,
+                    },
+                )),
+                mouse::Button::Right => Some(Message::RemoteDisplayInput(
+                    connection::RemoteInput::MouseButton {
+                        button: connection::RemoteMouseButton::Right,
+                        down: true,
+                    },
+                )),
+                mouse::Button::Middle => Some(Message::RemoteDisplayInput(
+                    connection::RemoteInput::MouseButton {
+                        button: connection::RemoteMouseButton::Middle,
+                        down: true,
+                    },
+                )),
+                _ => None,
+            }
+        }
+        iced::Event::Mouse(mouse::Event::ButtonReleased(button))
+            if status == event::Status::Ignored =>
+        {
+            match button {
+                mouse::Button::Left => Some(Message::RemoteDisplayInput(
+                    connection::RemoteInput::MouseButton {
+                        button: connection::RemoteMouseButton::Left,
+                        down: false,
+                    },
+                )),
+                mouse::Button::Right => Some(Message::RemoteDisplayInput(
+                    connection::RemoteInput::MouseButton {
+                        button: connection::RemoteMouseButton::Right,
+                        down: false,
+                    },
+                )),
+                mouse::Button::Middle => Some(Message::RemoteDisplayInput(
+                    connection::RemoteInput::MouseButton {
+                        button: connection::RemoteMouseButton::Middle,
+                        down: false,
+                    },
+                )),
+                _ => None,
+            }
+        }
+        iced::Event::Mouse(mouse::Event::WheelScrolled { delta })
+            if status == event::Status::Ignored =>
+        {
+            let (hx, vy) = match delta {
+                mouse::ScrollDelta::Lines { x, y } => (x, y),
+                mouse::ScrollDelta::Pixels { x, y } => (x / 40.0, y / 40.0),
+            };
+            let vy_step = (vy * 120.0).round();
+            let hx_step = (hx * 120.0).round();
+            if vy_step != 0.0 {
+                Some(Message::RemoteDisplayInput(connection::RemoteInput::MouseWheel {
+                    delta: vy_step.max(i16::MIN as f32).min(i16::MAX as f32) as i16,
+                }))
+            } else if hx_step != 0.0 {
+                Some(Message::RemoteDisplayInput(
+                    connection::RemoteInput::MouseHorizontalWheel {
+                        delta: hx_step.max(i16::MIN as f32).min(i16::MAX as f32) as i16,
+                    },
+                ))
+            } else {
+                None
+            }
+        }
+        _ => None,
     }
 }

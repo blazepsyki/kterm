@@ -25,6 +25,12 @@ pub enum ProtocolMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteDisplayProtocol {
+    Rdp,
+    Vnc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTabKind {
     Preferences,
     Theme,
@@ -55,9 +61,8 @@ pub struct Session {
     pub kind: SessionKind,
     pub terminal: TerminalEmulator,
     pub remote_display: Option<RemoteDisplayState>,
+    pub remote_display_protocol: Option<RemoteDisplayProtocol>,
     pub sender: Option<mpsc::UnboundedSender<connection::ConnectionInput>>,
-    pub rdp_secure_attention_active: bool,
-    pub vnc_rect_only_streak: u32,
     pub settings_tab_kind: Option<SettingsTabKind>,
 }
 
@@ -69,9 +74,8 @@ impl Session {
             kind: SessionKind::Welcome,
             terminal: TerminalEmulator::new(24, 80),
             remote_display: None,
+            remote_display_protocol: None,
             sender: None,
-            rdp_secure_attention_active: false,
-            vnc_rect_only_streak: 0,
             settings_tab_kind: None,
         }
     }
@@ -83,25 +87,36 @@ impl Session {
             kind: SessionKind::Terminal,
             terminal: TerminalEmulator::new(rows, cols),
             remote_display: None,
+            remote_display_protocol: None,
             sender: None,
-            rdp_secure_attention_active: false,
-            vnc_rect_only_streak: 0,
             settings_tab_kind: None,
         }
     }
 
-    pub fn new_remote_display(id: u64, name: String, width: u16, height: u16) -> Self {
+    pub fn new_remote_display(
+        id: u64,
+        name: String,
+        width: u16,
+        height: u16,
+        remote_display_protocol: RemoteDisplayProtocol,
+    ) -> Self {
         Self {
             id,
             name,
             kind: SessionKind::RemoteDisplay,
             terminal: TerminalEmulator::new(24, 80),
             remote_display: Some(RemoteDisplayState::new(width, height)),
+            remote_display_protocol: Some(remote_display_protocol),
             sender: None,
-            rdp_secure_attention_active: false,
-            vnc_rect_only_streak: 0,
             settings_tab_kind: None,
         }
+    }
+
+    pub fn is_rdp_display(&self) -> bool {
+        matches!(
+            self.remote_display_protocol.as_ref(),
+            Some(RemoteDisplayProtocol::Rdp)
+        )
     }
 
     pub fn new_settings(id: u64, tab_kind: SettingsTabKind) -> Self {
@@ -116,9 +131,8 @@ impl Session {
             kind: SessionKind::Settings,
             terminal: TerminalEmulator::new(24, 80),
             remote_display: None,
+            remote_display_protocol: None,
             sender: None,
-            rdp_secure_attention_active: false,
-            vnc_rect_only_streak: 0,
             settings_tab_kind: Some(tab_kind),
         }
     }

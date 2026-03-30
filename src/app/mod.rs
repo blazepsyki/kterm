@@ -9,6 +9,7 @@ pub mod update;
 
 pub use message::Message;
 pub use model::{
-    LocalShellOption, ProtocolMode, Session, SessionKind, SettingsTabKind, SettingsToggleKey,
+    LocalShellOption, ProtocolMode, RemoteDisplayProtocol, Session, SessionKind,
+    SettingsTabKind, SettingsToggleKey,
 };
 pub use state::State;

@@ -3,13 +3,13 @@
 use iced::widget::operation::focus;
 use iced::{keyboard, window, Task};
 
-use crate::app::{LocalShellOption, Message, Session, SessionKind, State};
+use crate::app::{LocalShellOption, Message, RemoteDisplayProtocol, Session, SessionKind, State};
 use crate::connection;
 use crate::connection::remote_input_policy::{
     current_keyboard_indicators, remote_secure_attention_inputs, unicode_inputs_for_text,
 };
 use crate::platform;
-use crate::remote_display::{self, RemoteDisplayState};
+use crate::remote_display::RemoteDisplayState;
 use crate::terminal::Selection;
 
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
@@ -129,91 +129,31 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                         }
                     }
                     connection::ConnectionEvent::Frames(frames) => {
-                        let is_vnc_session = session.name.starts_with("VNC:");
+                        let remote_display = &mut session.remote_display;
                         let frame_batch_len = frames.len();
-                        let mut full_count = 0usize;
-                        let mut rect_count = 0usize;
-                        for f in &frames {
-                            match f {
-                                remote_display::FrameUpdate::Full { .. } => full_count += 1,
-                                remote_display::FrameUpdate::Rect { .. } => rect_count += 1,
-                            }
-                        }
-                        if crate::rdp_trace_enabled() {
-                            log::info!(
-                                "[RDP-UI] session_id={} frames={} full={} rect={}",
-                                target_id,
-                                frame_batch_len,
-                                full_count,
-                                rect_count,
-                            );
-                        }
 
-                        if session.remote_display.is_none() {
-                            session.remote_display = Some(RemoteDisplayState::new(1280, 720));
+                        if remote_display.is_none() {
+                            *remote_display = Some(RemoteDisplayState::new(1280, 720));
                         }
-                        if let Some(display) = session.remote_display.as_mut() {
-                            let frame_seq_before = display.frame_seq;
+                        if let Some(display) = remote_display.as_mut() {
                             display.status_message = None;
 
-                            // Start a fresh dirty batch for this UI event.
-                            if !display.full_upload {
-                                display.dirty_rects.clear();
-                            }
+                            let batch_stats = display.apply_batch(frames);
 
-                            for frame in frames {
-                                display.apply(frame);
-                            }
-
-                            if is_vnc_session {
-                                if full_count > 0 {
-                                    session.vnc_rect_only_streak = 0;
-                                } else if rect_count > 0 {
-                                    session.vnc_rect_only_streak =
-                                        session.vnc_rect_only_streak.saturating_add(1);
-                                }
-                            }
-
-                            // RDP bootstrap: if the first meaningful update is rect-only,
-                            // force one full upload so the accumulated CPU buffer is presented.
-                            // Also force full upload for very large rect batches.
-                            let force_bootstrap = frame_seq_before == 0 && full_count == 0 && rect_count > 0;
-                            let force_large_batch = full_count == 0 && rect_count > 256;
-                            let force_vnc_streak = is_vnc_session
-                                && full_count == 0
-                                && rect_count > 0
-                                && session.vnc_rect_only_streak
-                                    >= crate::VNC_RECT_ONLY_STREAK_FORCE_THRESHOLD;
-                            let force_vnc_batch = is_vnc_session
-                                && full_count == 0
-                                && rect_count >= crate::VNC_RECT_BATCH_FORCE_THRESHOLD;
-
-                            if force_bootstrap
-                                || force_large_batch
-                                || force_vnc_streak
-                                || force_vnc_batch
-                            {
-                                display.full_upload = true;
-                                display.dirty_rects.clear();
-                                if is_vnc_session {
-                                    session.vnc_rect_only_streak = 0;
-                                }
-                                if crate::rdp_trace_enabled() {
-                                    let reason = if force_bootstrap {
-                                        "bootstrap"
-                                    } else if force_large_batch {
-                                        "large_rect_batch"
-                                    } else if force_vnc_streak {
-                                        "vnc_rect_only_streak"
-                                    } else {
-                                        "vnc_rect_batch"
-                                    };
+                            if crate::rdp_trace_enabled() {
+                                log::info!(
+                                    "[RDP-UI] session_id={} frames={} full={} rect={}",
+                                    target_id,
+                                    frame_batch_len,
+                                    batch_stats.full_count,
+                                    batch_stats.rect_count,
+                                );
+                                if let Some(reason) = batch_stats.forced_full_upload_reason {
                                     log::info!(
-                                        "[RDP-UI] force_full_upload session_id={} reason={} rects={} vnc_streak={}",
+                                        "[RDP-UI] force_full_upload session_id={} reason={} rects={}",
                                         target_id,
-                                        reason,
-                                        rect_count,
-                                        session.vnc_rect_only_streak,
+                                        reason.as_str(),
+                                        batch_stats.rect_count,
                                     );
                                 }
                             }
@@ -469,7 +409,13 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             let mut target_id = None;
             if let Some(session) = state.sessions.get_mut(target_index) {
                 target_id = Some(session.id);
-                *session = Session::new_remote_display(session.id, name, width, height);
+                *session = Session::new_remote_display(
+                    session.id,
+                    name,
+                    width,
+                    height,
+                    RemoteDisplayProtocol::Rdp,
+                );
             }
 
             if let Some(target_id) = target_id {
@@ -504,7 +450,13 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             let mut target_id = None;
             if let Some(session) = state.sessions.get_mut(target_index) {
                 target_id = Some(session.id);
-                *session = Session::new_remote_display(session.id, name, 1280, 720);
+                *session = Session::new_remote_display(
+                    session.id,
+                    name,
+                    1280,
+                    720,
+                    RemoteDisplayProtocol::Vnc,
+                );
                 if let Some(display) = session.remote_display.as_mut() {
                     display.status_message = Some("Connecting to VNC server...".to_string());
                 }
@@ -629,10 +581,11 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::RemoteSecureAttention(active) => {
             if let Some(session) = state.sessions.get_mut(state.active_index) {
-                session.rdp_secure_attention_active = active;
-                if let Some(ref sender) = session.sender {
-                    for input in remote_secure_attention_inputs(active) {
-                        let _ = sender.send(connection::ConnectionInput::RemoteInput(input));
+                if session.is_rdp_display() {
+                    if let Some(ref sender) = session.sender {
+                        for input in remote_secure_attention_inputs(active) {
+                            let _ = sender.send(connection::ConnectionInput::RemoteInput(input));
+                        }
                     }
                 }
             }

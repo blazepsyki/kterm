@@ -120,14 +120,14 @@ graph TD
 
 현재 완전 분리로 보기 어려운 결합 지점:
 - `SessionKind::RemoteDisplay` 하나로 RDP/VNC를 함께 표현하고, 두 프로토콜 모두 `RemoteDisplayState`를 공유합니다.
-- `app/update.rs`의 공통 프레임 처리 경로 안에 VNC 전용 healing/full-upload 휴리스틱이 들어 있습니다.
-- VNC 여부를 별도 enum이 아니라 `session.name.starts_with("VNC:")` 문자열 규칙으로 판별합니다.
-- `Session` 구조체가 `rdp_secure_attention_active`, `vnc_rect_only_streak`처럼 서로 다른 프로토콜의 상태 필드를 함께 보관합니다.
+- 원격 디스플레이 프로토콜 판별은 `Session.remote_display_protocol`의 `RemoteDisplayProtocol::{Rdp,Vnc}`로 처리합니다.
+- 프로토콜 비특정 bootstrap/large-batch full-upload fallback은 `app/update.rs`가 아니라 `remote_display/mod.rs`의 `RemoteDisplayState::apply_batch()`가 담당합니다.
 - 포커스 획득/상실 시점의 lock-key sync와 modifier release는 공통 메시지로 처리되지만, 실제 의미와 변환 방식은 각 백엔드에서 다릅니다.
 
 ### 4) 원격 디스플레이 계층: `remote_display/` (RDP/VNC 공용 렌더러)
 RDP/VNC 세션에서 수신한 픽셀 데이터를 화면에 표시하기 위한 공용 모듈입니다.
 - **`mod.rs`**: `FrameUpdate`(Full/Rect) 타입과 `RemoteDisplayState`(Arc 기반 Copy-on-Write RGBA 프레임 버퍼, Dirty Rect 목록)를 정의합니다.
+- **`mod.rs`**: 배치 적용 시 bootstrap/large rect batch를 공통 full-upload fallback으로 승격하는 `apply_batch()` 로직도 포함합니다.
 - **`renderer.rs`**: `RemoteDisplayPipeline`(`shader::Pipeline` 구현)으로 wgpu GPU 텍스처를 관리합니다. Dirty Rect 단위로 부분 텍스처 업로드를 수행해 GPU 대역폭을 최소화합니다.
 - **`remote_display.wgsl`**: 뷰포트/텍스처 크기 유니폼 기반 전체 화면 스케일링 WGSL 셰이더입니다.
 

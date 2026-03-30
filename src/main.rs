@@ -26,9 +26,6 @@ pub(crate) const RDP_RESOLUTION_PRESETS: &[(u16, u16)] = &[
     (2560, 1440),
 ];
 
-pub(crate) const VNC_RECT_ONLY_STREAK_FORCE_THRESHOLD: u32 = 6;
-pub(crate) const VNC_RECT_BATCH_FORCE_THRESHOLD: usize = 64;
-
 static RDP_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
 static SESSION_LOG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
 static SESSION_LOG_FILE: OnceLock<Arc<Mutex<File>>> = OnceLock::new();
