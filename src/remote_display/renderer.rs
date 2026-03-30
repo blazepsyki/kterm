@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// GPU-accelerated RDP display renderer using iced's Shader widget + wgpu.
+// GPU-accelerated remote display renderer using iced's Shader widget + wgpu.
 // Maintains a persistent GPU texture and only uploads dirty regions.
 
 use iced::widget::shader;
@@ -22,7 +22,7 @@ struct Uniforms {
 
 // ── Pipeline — owns GPU resources, created once ─────────────────────
 
-pub struct RdpPipeline {
+pub struct RemoteDisplayPipeline {
     render_pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -40,7 +40,7 @@ pub struct RdpPipeline {
     last_viewport_height: u32,
 }
 
-impl RdpPipeline {
+impl RemoteDisplayPipeline {
     fn create_texture_resources(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
@@ -50,7 +50,7 @@ impl RdpPipeline {
         height: u32,
     ) -> (wgpu::Texture, wgpu::TextureView, wgpu::BindGroup) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("rdp_display_texture"),
+            label: Some("remote_display_texture"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
@@ -61,7 +61,7 @@ impl RdpPipeline {
         });
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rdp_bind_group"),
+            label: Some("remote_display_bind_group"),
             layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&texture_view) },
@@ -73,15 +73,15 @@ impl RdpPipeline {
     }
 }
 
-impl shader::Pipeline for RdpPipeline {
+impl shader::Pipeline for RemoteDisplayPipeline {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("rdp_display_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("rdp_display.wgsl").into()),
+            label: Some("remote_display_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("remote_display.wgsl").into()),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("rdp_bind_group_layout"),
+            label: Some("remote_display_bind_group_layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -113,13 +113,13 @@ impl shader::Pipeline for RdpPipeline {
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("rdp_pipeline_layout"),
+            label: Some("remote_display_pipeline_layout"),
             bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
         });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("rdp_render_pipeline"),
+            label: Some("remote_display_render_pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader_module,
@@ -150,7 +150,7 @@ impl shader::Pipeline for RdpPipeline {
         });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("rdp_sampler"),
+            label: Some("remote_display_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
@@ -159,7 +159,7 @@ impl shader::Pipeline for RdpPipeline {
         });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("rdp_uniform_buf"),
+            label: Some("remote_display_uniform_buf"),
             size: std::mem::size_of::<Uniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -192,7 +192,7 @@ impl shader::Pipeline for RdpPipeline {
 // ── Primitive — per-frame data passed from CPU → GPU ────────────────
 
 #[derive(Debug)]
-pub struct RdpFrame {
+pub struct RemoteDisplayFrame {
     pub rgba: Arc<Vec<u8>>,
     pub tex_width: u32,
     pub tex_height: u32,
@@ -210,8 +210,8 @@ pub struct DirtyRect {
     pub height: u32,
 }
 
-impl shader::Primitive for RdpFrame {
-    type Pipeline = RdpPipeline;
+impl shader::Primitive for RemoteDisplayFrame {
+    type Pipeline = RemoteDisplayPipeline;
 
     fn prepare(
         &self,
@@ -228,7 +228,7 @@ impl shader::Primitive for RdpFrame {
 
         // Recreate texture if the desktop size changed.
         if tw != pipeline.tex_width || th != pipeline.tex_height {
-            let (texture, texture_view, bind_group) = RdpPipeline::create_texture_resources(
+            let (texture, texture_view, bind_group) = RemoteDisplayPipeline::create_texture_resources(
                 device, &pipeline.bind_group_layout, &pipeline.sampler, &pipeline.uniform_buf, tw, th,
             );
             pipeline.texture = texture;
@@ -347,7 +347,7 @@ impl shader::Primitive for RdpFrame {
         };
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("rdp_render_pass"),
+            label: Some("remote_display_render_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
@@ -378,7 +378,7 @@ impl shader::Primitive for RdpFrame {
 
 // ── Program — iced Shader widget interface ──────────────────────────
 
-pub struct RdpDisplayProgram {
+pub struct RemoteDisplayProgram {
     pub frame: Arc<Vec<u8>>,
     pub tex_width: u32,
     pub tex_height: u32,
@@ -388,9 +388,9 @@ pub struct RdpDisplayProgram {
     pub source_id: u64,
 }
 
-impl<Message> shader::Program<Message> for RdpDisplayProgram {
+impl<Message> shader::Program<Message> for RemoteDisplayProgram {
     type State = ();
-    type Primitive = RdpFrame;
+    type Primitive = RemoteDisplayFrame;
 
     fn draw(
         &self,
@@ -398,7 +398,7 @@ impl<Message> shader::Program<Message> for RdpDisplayProgram {
         _cursor: mouse::Cursor,
         _bounds: Rectangle,
     ) -> Self::Primitive {
-        RdpFrame {
+        RemoteDisplayFrame {
             rgba: Arc::clone(&self.frame),
             tex_width: self.tex_width,
             tex_height: self.tex_height,

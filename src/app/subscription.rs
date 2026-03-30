@@ -23,8 +23,10 @@ pub fn subscription(state: &State) -> Subscription<Message> {
         iced::Event::Window(window::Event::Resized(size)) => {
             Some(Message::WindowSizeChanged(size.width, size.height))
         }
-        iced::Event::Window(window::Event::Focused) => Some(Message::SyncRdpKeyboardIndicators),
-        iced::Event::Window(window::Event::Unfocused) => Some(Message::ReleaseRdpModifiers),
+        iced::Event::Window(window::Event::Focused) => {
+            Some(Message::SyncRemoteKeyboardIndicators)
+        }
+        iced::Event::Window(window::Event::Unfocused) => Some(Message::ReleaseRemoteModifiers),
         _ => None,
     });
 
@@ -179,7 +181,7 @@ pub fn subscription(state: &State) -> Subscription<Message> {
 
                 match route_key_pressed(&key, text.as_deref(), &physical_key) {
                     RoutedKeyEvent::Ignore => None,
-                    RoutedKeyEvent::SyncIndicators => Some(Message::SyncRdpKeyboardIndicators),
+                    RoutedKeyEvent::SyncIndicators => Some(Message::SyncRemoteKeyboardIndicators),
                     RoutedKeyEvent::Input(input) => Some(Message::RemoteDisplayInput(input)),
                 }
             }
@@ -199,7 +201,7 @@ pub fn subscription(state: &State) -> Subscription<Message> {
 
                 match route_key_released(&key, &physical_key) {
                     RoutedKeyEvent::Ignore => None,
-                    RoutedKeyEvent::SyncIndicators => Some(Message::SyncRdpKeyboardIndicators),
+                    RoutedKeyEvent::SyncIndicators => Some(Message::SyncRemoteKeyboardIndicators),
                     RoutedKeyEvent::Input(input) => Some(Message::RemoteDisplayInput(input)),
                 }
             }

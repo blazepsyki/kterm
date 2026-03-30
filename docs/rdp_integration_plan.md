@@ -139,7 +139,7 @@
 - 원격 디스플레이 세션에서 Iced IME commit 문자열을 RDP Unicode 입력으로 전송하도록 분기 처리 완료.
 - 원격 Secure Attention alias로 `Ctrl+Alt+End`를 `Ctrl+Alt+Del`의 Delete 입력으로 매핑 완료.
 - 다중 픽섹 포맷 디코딩(RDP6 32bpp, RLE 16/24bpp, 비압축 BGRX/RGB565) 완료.
-- wgpu GPU 텍스처 + WGSL 쉐이더 기반 `RdpPipeline` 렌더러 완료.
+- wgpu GPU 텍스처 + WGSL 쉐이더 기반 `RemoteDisplayPipeline` 렌더러 완료.
 - Dirty Rect 단위 부분 텍스처 업로드(GPU 대역폭 최소화) 완료.
 - 프레임 배치 병합(연속 Frames 이벤트 통합, ≈60fps 상한 스로틀링) 완료.
 - Slow-path 비트맵 업데이트 폴백 처리(`try_handle_slowpath_bitmap`) 완료.
@@ -274,7 +274,7 @@
 - [x] 프레임 버퍼(RGBA) 상태 저장 및 갱신(Full/Rect 적용)
 - [x] Iced 이미지 렌더링으로 화면 표시(초기: RDP 탭에 FrameUpdate 반영)
 - [x] Rect 기반 부분 프레임 업데이트 경로 추가(FrameUpdate::Rect)
-- [x] wgpu GPU 텍스처 + WGSL 쉐이더 기반 `RdpPipeline` 렌더러 구현
+- [x] wgpu GPU 텍스처 + WGSL 쉐이더 기반 `RemoteDisplayPipeline` 렌더러 구현
 - [x] Dirty Rect 부분 텍스처 업로드로 GPU 대역폭 최소화
 - [x] Slow-path 비트맵 업데이트 폴백 처리(RDP6/RLE 16/24bpp/BGRX)
 - [x] 프레임 스로틀링(≈60fps 상한, 16ms 타이머 + 50ms drain)

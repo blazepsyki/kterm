@@ -638,7 +638,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::SyncRdpKeyboardIndicators => {
+        Message::SyncRemoteKeyboardIndicators => {
             if let Some(session) = state.sessions.get(state.active_index) {
                 if matches!(session.kind, SessionKind::RemoteDisplay) {
                     if let Some(ref sender) = session.sender {
@@ -650,7 +650,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             Task::none()
         }
-        Message::ReleaseRdpModifiers => {
+        Message::ReleaseRemoteModifiers => {
             if let Some(session) = state.sessions.get(state.active_index) {
                 if matches!(session.kind, SessionKind::RemoteDisplay) {
                     if let Some(ref sender) = session.sender {

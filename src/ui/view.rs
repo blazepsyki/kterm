@@ -427,7 +427,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
                         .height(Length::Fill)
                         .into()
                     } else if display.width > 0 {
-                        let program = remote_display::renderer::RdpDisplayProgram {
+                        let program = remote_display::renderer::RemoteDisplayProgram {
                             frame: std::sync::Arc::clone(&display.rgba),
                             tex_width: display.width as u32,
                             tex_height: display.height as u32,
@@ -447,7 +447,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
                     } else {
                         container(
                             column![
-                                text("RDP session connected"),
+                                text("Remote display session connected"),
                                 text("Waiting for first frame...").size(14),
                             ]
                             .spacing(10),

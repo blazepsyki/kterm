@@ -90,7 +90,7 @@ graph TD
 - Iced의 `Program` 트레이트를 구현한 `TerminalView`를 통해, `TerminalEmulator`가 가진 데이터를 화면 픽셀로 변환(그리기)하는 역할을 직접 수행합니다.
 
 ### 2) 공용 인터페이스 계층: `connection/mod.rs` (Polymorphic Interface)
-다양한 프로토콜(SSH, Telnet, Serial, Local, RDP)이 앱 계층(`app/update.rs`, `ui/view.rs`)과 완벽히 격리되어 호환될 수 있도록 만들어진 공용 열거형 껍데기입니다. 
+다양한 프로토콜(SSH, Telnet, Serial, Local, RDP, VNC)이 앱 계층(`app/update.rs`, `ui/view.rs`)과 공통 타입으로 통신할 수 있도록 만든 인터페이스 계층입니다. 다만 원격 디스플레이(RDP/VNC)는 입력 수집과 렌더링 경로 일부를 공유하므로, 완전히 독립된 파이프라인은 아닙니다.
 - `ConnectionEvent`(Connected/Data/Frames/Disconnected/Error) 및 `ConnectionInput`(Data/Resize/SyncKeyboardIndicators/ReleaseAllModifiers/RemoteInput) 구조체를 담고 있으며, 이를 통해 모든 프로토콜 모듈이 동일한 반환값과 입력 포맷을 가지는 강제적 다형성(Polymorphism)을 띠게 됩니다.
 
 ### 3) 백엔드 통신망: 각 프로토콜 파이프라인 (Backend Pipelines)
@@ -104,11 +104,32 @@ graph TD
 - **OS 플랫폼 추상화 (`platform/mod.rs`)**: 현재 윈도우 한정으로 `platform/windows.rs`가 `portable-pty` 기반 로컬 가상 터미널 엔진과 `WinClipboard` 기반 CLIPRDR 백엔드 생성/정리 함수를 함께 제공합니다.
 - **로컬 셸 탐지 (`app/local_shell.rs`)**: 시스템의 실행 가능한 셸(`pwsh/powershell/cmd/bash`)을 탐지해 Welcome UI의 선택 리스트를 구성합니다.
 
+### 3-1) 원격 입력 공통층과 프로토콜 어댑터 경계
+현재 RDP/VNC 입력 경로는 "완전 분리"가 아니라 "공통 정규화층 + 프로토콜별 송신 어댑터" 구조입니다.
+
+공통층:
+- `app/subscription.rs`가 RemoteDisplay 탭의 키보드/마우스/포커스 이벤트를 공통으로 수집하고 `Message::RemoteDisplayInput`, `Message::SyncRemoteKeyboardIndicators`, `Message::ReleaseRemoteModifiers`를 생성합니다.
+- `connection/remote_input_policy.rs`가 Iced 키 이벤트를 프로토콜 중립적인 `RemoteInput`으로 정규화합니다.
+- `app/update.rs`가 공통 메시지를 받아 `ConnectionInput::RemoteInput`, `ConnectionInput::SyncKeyboardIndicators`, `ConnectionInput::ReleaseAllModifiers`로 워커 채널에 전달합니다.
+- `app/update.rs`의 `transform_remote_mouse()`가 공통 뷰포트 기준 좌표 변환을 수행하므로, 마우스 좌표 정책도 상단에서는 공유됩니다.
+- `remote_display/mod.rs`와 `remote_display/renderer.rs`는 RDP/VNC 모두가 생성한 `FrameUpdate`를 동일한 GPU 렌더 경로로 처리합니다.
+
+프로토콜별 어댑터:
+- `rdp.rs`는 공통 `ConnectionInput`을 `ironrdp-input::Operation`과 FastPath 입력 PDU로 변환합니다.
+- `vnc.rs`는 동일한 `ConnectionInput`을 VNC X11 key/pointer 이벤트로 변환합니다.
+
+현재 완전 분리로 보기 어려운 결합 지점:
+- `SessionKind::RemoteDisplay` 하나로 RDP/VNC를 함께 표현하고, 두 프로토콜 모두 `RemoteDisplayState`를 공유합니다.
+- `app/update.rs`의 공통 프레임 처리 경로 안에 VNC 전용 healing/full-upload 휴리스틱이 들어 있습니다.
+- VNC 여부를 별도 enum이 아니라 `session.name.starts_with("VNC:")` 문자열 규칙으로 판별합니다.
+- `Session` 구조체가 `rdp_secure_attention_active`, `vnc_rect_only_streak`처럼 서로 다른 프로토콜의 상태 필드를 함께 보관합니다.
+- 포커스 획득/상실 시점의 lock-key sync와 modifier release는 공통 메시지로 처리되지만, 실제 의미와 변환 방식은 각 백엔드에서 다릅니다.
+
 ### 4) 원격 디스플레이 계층: `remote_display/` (RDP/VNC 공용 렌더러)
 RDP/VNC 세션에서 수신한 픽셀 데이터를 화면에 표시하기 위한 공용 모듈입니다.
 - **`mod.rs`**: `FrameUpdate`(Full/Rect) 타입과 `RemoteDisplayState`(Arc 기반 Copy-on-Write RGBA 프레임 버퍼, Dirty Rect 목록)를 정의합니다.
-- **`renderer.rs`**: `RdpPipeline`(`shader::Pipeline` 구현)으로 wgpu GPU 텍스처를 관리합니다. Dirty Rect 단위로 부분 텍스처 업로드를 수행해 GPU 대역폭을 최소화합니다.
-- **`rdp_display.wgsl`**: 뷰포트/텍스처 크기 유니폼 기반 전체 화면 스케일링 WGSL 셰이더입니다.
+- **`renderer.rs`**: `RemoteDisplayPipeline`(`shader::Pipeline` 구현)으로 wgpu GPU 텍스처를 관리합니다. Dirty Rect 단위로 부분 텍스처 업로드를 수행해 GPU 대역폭을 최소화합니다.
+- **`remote_display.wgsl`**: 뷰포트/텍스처 크기 유니폼 기반 전체 화면 스케일링 WGSL 셰이더입니다.
 
 ### 5) 앱 오케스트레이션: `main.rs` + `app/*` + `ui/*`
 - `main.rs`는 Iced application 부트스트랩과 공용 상수/로깅 초기화만 담당합니다.
