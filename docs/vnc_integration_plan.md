@@ -78,7 +78,7 @@
 - 탭 닫기, 서버 종료, 네트워크 일시 실패를 분리 처리한다.
 - Disconnected/Error 전파와 워커 정리를 안정화한다.
 
-8. Phase H - 인코딩 전략 확장 (미착수)
+8. Phase H - 인코딩 전략 확장 (진행 중)
 - Raw 경로 안정화 후 서버 호환성 기반 인코딩 우선순위(ZRLE/Tight/Raw fallback)를 적용한다.
 - 성능 로그를 도입한다.
 
@@ -123,8 +123,8 @@
 ## 미구현 요약 (코드 점검 기준)
 1. Clipboard: 서버 텍스트 이벤트를 시스템 클립보드와 동기화하지 않음.
 2. SetDesktopSize: 창 크기 변경 시 서버 해상도 재협상 없이 FullRefresh만 요청.
-3. 인코딩 확장: Tight/ZRLE 경로 미사용(현재 CopyRect/Raw/DesktopSizePseudo/CursorPseudo 사용).
-4. 복구 정책: 연결 단절 시 자동 재시도/백오프/상태별 UX 분기 미구현.
+3. 인코딩 확장: Tight/ZRLE 협상은 적용되었으나 서버별 우선순위/정책 확정은 미완료.
+4. 복구 정책: VNC 자동 재시도(최대 5회, 지수 백오프)는 시작되었으나 상태별 UX 분기는 미완료.
 
 ## Phase C 진행 메모 (2026-03-28)
 1. 잔상 저감을 위해 CursorPseudo 오버레이와 원본 프레임버퍼 복원 순서를 명시적으로 유지.
@@ -165,3 +165,16 @@
   - ConnectionInput::SyncKeyboardIndicators를 VNC 경로에서 무시하지 않고 처리
   - Caps/Num/Scroll Lock 상태 변화 시 keysym 토글(press/release) 전송
   - 첫 동기화 시에는 baseline만 설정하고 이후 변화분만 반영
+
+## 진행 로그 (2026-03-31)
+- [진행] Phase H(인코딩 확장)
+  - `src/connection/vnc.rs` 협상 체인에 `VncEncoding::Zrle`, `VncEncoding::Tight` 추가.
+  - 연결 요약 로그(encodings)에 ZRLE/Tight 반영.
+  - `VncEvent::JpegImage` 수신 시 rect/bytes 로그 계측 추가(현재 디코딩 미구현).
+  - 5초 간격 메트릭 로그 추가: ticks/events/full/rect/forced_full_batches/jpeg_events/rect_only_streak.
+- [진행] Phase G(복구 정책)
+  - 설정 `Auto-reconnect`를 VNC 연결 파라미터로 연결.
+  - 연결 실패/단절 시 VNC 자동 재시도(최대 5회, 1s -> 2s -> 4s -> 8s 백오프) 추가.
+  - 인증/보안 실패(password/security negotiation)는 비재시도(non-retryable)로 분기.
+- [다음] 서버 호환성 매트릭스 실행
+  - 수동 검증 결과 기록 파일: `docs/vnc_compatibility_matrix.md`.

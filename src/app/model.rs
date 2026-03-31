@@ -48,6 +48,7 @@ pub enum SettingsToggleKey {
     RdpFontSmoothing,
     RdpDesktopComposition,
     VncRemoteCursor,
+    VncUseCopyRect,
     VncSharedSession,
     VncViewOnly,
     CompactTabStyle,
@@ -66,6 +67,15 @@ pub enum SettingsTextKey {
     LocalStartupArgs,
     RdpColorDepth,
     VncTimeout,
+    VncRectCollapseThresholdDefault,
+    VncMaxEventsPerTickDefault,
+    VncEventBudgetMsDefault,
+    VncRectCollapseThresholdRemoteCursor,
+    VncMaxEventsPerTickRemoteCursor,
+    VncEventBudgetMsRemoteCursor,
+    VncRectCollapseThresholdRemoteCursorCopyRect,
+    VncMaxEventsPerTickRemoteCursorCopyRect,
+    VncEventBudgetMsRemoteCursorCopyRect,
 }
 
 #[derive(Debug, Clone)]

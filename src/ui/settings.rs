@@ -431,6 +431,12 @@ fn render_vnc_settings(state: &State, title: String) -> Element<'static, Message
             ),
             setting_toggle_row(
                 state,
+                "Use CopyRect Encoding",
+                "Enable CopyRect optimization (can interact with cursor ghosting)",
+                SettingsToggleKey::VncUseCopyRect,
+            ),
+            setting_toggle_row(
+                state,
                 "Shared Session",
                 "Allow sharing the same VNC desktop with other clients",
                 SettingsToggleKey::VncSharedSession,
@@ -440,6 +446,60 @@ fn render_vnc_settings(state: &State, title: String) -> Element<'static, Message
                 "View Only",
                 "Disable keyboard and mouse input to the remote host",
                 SettingsToggleKey::VncViewOnly,
+            ),
+            setting_text_value_row(
+                state,
+                "Rect Collapse Threshold (Default)",
+                "Min rect updates before collapsing to one union rect (normal mode)",
+                SettingsTextKey::VncRectCollapseThresholdDefault,
+            ),
+            setting_text_value_row(
+                state,
+                "Max Events/Tick (Default)",
+                "Max VNC events processed per 16ms tick (normal mode)",
+                SettingsTextKey::VncMaxEventsPerTickDefault,
+            ),
+            setting_text_value_row(
+                state,
+                "Event Budget ms (Default)",
+                "Time budget per tick for VNC event polling (normal mode)",
+                SettingsTextKey::VncEventBudgetMsDefault,
+            ),
+            setting_text_value_row(
+                state,
+                "Rect Collapse Threshold (Remote Cursor)",
+                "Threshold when Remote Cursor is enabled and CopyRect is disabled",
+                SettingsTextKey::VncRectCollapseThresholdRemoteCursor,
+            ),
+            setting_text_value_row(
+                state,
+                "Max Events/Tick (Remote Cursor)",
+                "Event cap when Remote Cursor is enabled and CopyRect is disabled",
+                SettingsTextKey::VncMaxEventsPerTickRemoteCursor,
+            ),
+            setting_text_value_row(
+                state,
+                "Event Budget ms (Remote Cursor)",
+                "Polling budget when Remote Cursor is enabled and CopyRect is disabled",
+                SettingsTextKey::VncEventBudgetMsRemoteCursor,
+            ),
+            setting_text_value_row(
+                state,
+                "Rect Collapse Threshold (Remote Cursor + CopyRect)",
+                "Threshold when both Remote Cursor and CopyRect are enabled",
+                SettingsTextKey::VncRectCollapseThresholdRemoteCursorCopyRect,
+            ),
+            setting_text_value_row(
+                state,
+                "Max Events/Tick (Remote Cursor + CopyRect)",
+                "Event cap when both Remote Cursor and CopyRect are enabled",
+                SettingsTextKey::VncMaxEventsPerTickRemoteCursorCopyRect,
+            ),
+            setting_text_value_row(
+                state,
+                "Event Budget ms (Remote Cursor + CopyRect)",
+                "Polling budget when both Remote Cursor and CopyRect are enabled",
+                SettingsTextKey::VncEventBudgetMsRemoteCursorCopyRect,
             ),
         ],
     )

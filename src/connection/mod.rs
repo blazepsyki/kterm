@@ -66,6 +66,7 @@ pub enum ConnectionInput {
     Resize { cols: u16, rows: u16 },
     SyncKeyboardIndicators(KeyboardIndicators),
     ReleaseAllModifiers,
+    Shutdown,
     RemoteInput(RemoteInput),
 }
 

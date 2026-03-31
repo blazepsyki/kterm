@@ -152,6 +152,9 @@ pub fn connect_and_subscribe(
                             Some(ConnectionInput::ReleaseAllModifiers) => {
                                 Some((ConnectionEvent::Data(vec![]), SshState::Connected { session, channel, ssh_to_iced_rx, iced_to_ssh_rx }))
                             }
+                            Some(ConnectionInput::Shutdown) => {
+                                Some((ConnectionEvent::Disconnected, SshState::Finished))
+                            }
                             None => Some((ConnectionEvent::Disconnected, SshState::Finished)),
                         }
                     }

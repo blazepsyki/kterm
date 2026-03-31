@@ -62,6 +62,7 @@ pub struct State {
     pub settings_rdp_font_smoothing: bool,
     pub settings_rdp_desktop_composition: bool,
     pub settings_vnc_remote_cursor: bool,
+    pub settings_vnc_use_copyrect: bool,
     pub settings_vnc_shared_session: bool,
     pub settings_vnc_view_only: bool,
     pub settings_theme_compact_tab_style: bool,
@@ -77,6 +78,15 @@ pub struct State {
     pub settings_local_startup_args: String,
     pub settings_rdp_color_depth: String,
     pub settings_vnc_timeout: String,
+    pub settings_vnc_rect_collapse_threshold_default: String,
+    pub settings_vnc_max_events_per_tick_default: String,
+    pub settings_vnc_event_budget_ms_default: String,
+    pub settings_vnc_rect_collapse_threshold_remote_cursor: String,
+    pub settings_vnc_max_events_per_tick_remote_cursor: String,
+    pub settings_vnc_event_budget_ms_remote_cursor: String,
+    pub settings_vnc_rect_collapse_threshold_remote_cursor_copyrect: String,
+    pub settings_vnc_max_events_per_tick_remote_cursor_copyrect: String,
+    pub settings_vnc_event_budget_ms_remote_cursor_copyrect: String,
 }
 
 impl Default for State {
@@ -136,6 +146,7 @@ impl Default for State {
             settings_rdp_font_smoothing: true,
             settings_rdp_desktop_composition: true,
             settings_vnc_remote_cursor: true,
+            settings_vnc_use_copyrect: false,
             settings_vnc_shared_session: true,
             settings_vnc_view_only: false,
             settings_theme_compact_tab_style: false,
@@ -151,6 +162,15 @@ impl Default for State {
             settings_local_startup_args: String::new(),
             settings_rdp_color_depth: "32".to_string(),
             settings_vnc_timeout: "10".to_string(),
+            settings_vnc_rect_collapse_threshold_default: "96".to_string(),
+            settings_vnc_max_events_per_tick_default: "512".to_string(),
+            settings_vnc_event_budget_ms_default: "8".to_string(),
+            settings_vnc_rect_collapse_threshold_remote_cursor: "24".to_string(),
+            settings_vnc_max_events_per_tick_remote_cursor: "384".to_string(),
+            settings_vnc_event_budget_ms_remote_cursor: "8".to_string(),
+            settings_vnc_rect_collapse_threshold_remote_cursor_copyrect: "24".to_string(),
+            settings_vnc_max_events_per_tick_remote_cursor_copyrect: "256".to_string(),
+            settings_vnc_event_budget_ms_remote_cursor_copyrect: "8".to_string(),
         }
     }
 }
@@ -200,6 +220,7 @@ impl State {
             SettingsToggleKey::RdpFontSmoothing => self.settings_rdp_font_smoothing,
             SettingsToggleKey::RdpDesktopComposition => self.settings_rdp_desktop_composition,
             SettingsToggleKey::VncRemoteCursor => self.settings_vnc_remote_cursor,
+            SettingsToggleKey::VncUseCopyRect => self.settings_vnc_use_copyrect,
             SettingsToggleKey::VncSharedSession => self.settings_vnc_shared_session,
             SettingsToggleKey::VncViewOnly => self.settings_vnc_view_only,
             SettingsToggleKey::CompactTabStyle => self.settings_theme_compact_tab_style,
@@ -218,6 +239,7 @@ impl State {
             SettingsToggleKey::RdpFontSmoothing => self.settings_rdp_font_smoothing = !self.settings_rdp_font_smoothing,
             SettingsToggleKey::RdpDesktopComposition => self.settings_rdp_desktop_composition = !self.settings_rdp_desktop_composition,
             SettingsToggleKey::VncRemoteCursor => self.settings_vnc_remote_cursor = !self.settings_vnc_remote_cursor,
+            SettingsToggleKey::VncUseCopyRect => self.settings_vnc_use_copyrect = !self.settings_vnc_use_copyrect,
             SettingsToggleKey::VncSharedSession => self.settings_vnc_shared_session = !self.settings_vnc_shared_session,
             SettingsToggleKey::VncViewOnly => self.settings_vnc_view_only = !self.settings_vnc_view_only,
             SettingsToggleKey::CompactTabStyle => self.settings_theme_compact_tab_style = !self.settings_theme_compact_tab_style,
@@ -237,6 +259,27 @@ impl State {
             SettingsTextKey::LocalStartupArgs => &self.settings_local_startup_args,
             SettingsTextKey::RdpColorDepth => &self.settings_rdp_color_depth,
             SettingsTextKey::VncTimeout => &self.settings_vnc_timeout,
+            SettingsTextKey::VncRectCollapseThresholdDefault => {
+                &self.settings_vnc_rect_collapse_threshold_default
+            }
+            SettingsTextKey::VncMaxEventsPerTickDefault => &self.settings_vnc_max_events_per_tick_default,
+            SettingsTextKey::VncEventBudgetMsDefault => &self.settings_vnc_event_budget_ms_default,
+            SettingsTextKey::VncRectCollapseThresholdRemoteCursor => {
+                &self.settings_vnc_rect_collapse_threshold_remote_cursor
+            }
+            SettingsTextKey::VncMaxEventsPerTickRemoteCursor => {
+                &self.settings_vnc_max_events_per_tick_remote_cursor
+            }
+            SettingsTextKey::VncEventBudgetMsRemoteCursor => &self.settings_vnc_event_budget_ms_remote_cursor,
+            SettingsTextKey::VncRectCollapseThresholdRemoteCursorCopyRect => {
+                &self.settings_vnc_rect_collapse_threshold_remote_cursor_copyrect
+            }
+            SettingsTextKey::VncMaxEventsPerTickRemoteCursorCopyRect => {
+                &self.settings_vnc_max_events_per_tick_remote_cursor_copyrect
+            }
+            SettingsTextKey::VncEventBudgetMsRemoteCursorCopyRect => {
+                &self.settings_vnc_event_budget_ms_remote_cursor_copyrect
+            }
         }
     }
 
@@ -253,6 +296,31 @@ impl State {
             SettingsTextKey::LocalStartupArgs => self.settings_local_startup_args = value,
             SettingsTextKey::RdpColorDepth => self.settings_rdp_color_depth = value,
             SettingsTextKey::VncTimeout => self.settings_vnc_timeout = value,
+            SettingsTextKey::VncRectCollapseThresholdDefault => {
+                self.settings_vnc_rect_collapse_threshold_default = value
+            }
+            SettingsTextKey::VncMaxEventsPerTickDefault => {
+                self.settings_vnc_max_events_per_tick_default = value
+            }
+            SettingsTextKey::VncEventBudgetMsDefault => self.settings_vnc_event_budget_ms_default = value,
+            SettingsTextKey::VncRectCollapseThresholdRemoteCursor => {
+                self.settings_vnc_rect_collapse_threshold_remote_cursor = value
+            }
+            SettingsTextKey::VncMaxEventsPerTickRemoteCursor => {
+                self.settings_vnc_max_events_per_tick_remote_cursor = value
+            }
+            SettingsTextKey::VncEventBudgetMsRemoteCursor => {
+                self.settings_vnc_event_budget_ms_remote_cursor = value
+            }
+            SettingsTextKey::VncRectCollapseThresholdRemoteCursorCopyRect => {
+                self.settings_vnc_rect_collapse_threshold_remote_cursor_copyrect = value
+            }
+            SettingsTextKey::VncMaxEventsPerTickRemoteCursorCopyRect => {
+                self.settings_vnc_max_events_per_tick_remote_cursor_copyrect = value
+            }
+            SettingsTextKey::VncEventBudgetMsRemoteCursorCopyRect => {
+                self.settings_vnc_event_budget_ms_remote_cursor_copyrect = value
+            }
         }
     }
 }

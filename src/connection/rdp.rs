@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Write as _;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use iced::futures::{self, StreamExt};
 use log::{info, warn};
@@ -157,15 +157,23 @@ async fn run_rdp_worker_inner(
     font_smoothing: bool,
     desktop_composition: bool,
 ) -> Result<(), String> {
-    // --- PDU trace log -------------------------------------------------------
-    // Log handshake sequencing plus every runtime Action so protocol behavior
-    // can be inspected end-to-end.
-    let pdu_log_path = crate::runtime_log_path();
-    let mut pdu_log = OpenOptions::new()
-        .create(true).append(true).open(&pdu_log_path)
-        .map_err(|e| format!("cannot open PDU log: {}", e))?;
-    writeln!(pdu_log, "\n=== RDP session start  host={host} ===")
-        .map_err(|e| format!("pdu_log write: {}", e))?;
+    let trace_enabled = crate::rdp_trace_enabled();
+
+    // PDU-by-PDU file tracing is intentionally opt-in because this can become
+    // very I/O heavy on busy sessions.
+    let mut pdu_log = if trace_enabled {
+        let pdu_log_path = crate::runtime_log_path();
+        let mut log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&pdu_log_path)
+            .map_err(|e| format!("cannot open PDU log: {}", e))?;
+        writeln!(log, "\n=== RDP session start  host={host} ===")
+            .map_err(|e| format!("pdu_log write: {}", e))?;
+        Some(log)
+    } else {
+        None
+    };
 
     let config = build_config(username, password, None, width, height, enable_credssp, enable_audio, color_depth, font_smoothing, desktop_composition);
     let (gfx_frame_tx, mut gfx_frame_rx) = mpsc::unbounded_channel::<Vec<crate::remote_display::FrameUpdate>>();
@@ -188,10 +196,31 @@ async fn run_rdp_worker_inner(
     let mut last_indicators: Option<KeyboardIndicators> = None;
     let mut frame_tick = tokio::time::interval(Duration::from_millis(16));
     frame_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut metrics_tick = tokio::time::interval(Duration::from_secs(2));
+    metrics_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let mut ui_frame_batches = 0usize;
+    let mut ui_frame_updates = 0usize;
+    let mut ui_frame_bytes = 0usize;
+    let mut input_events = 0usize;
+    let mut input_batches = 0usize;
+    let mut max_input_batch = 0usize;
+    let mut pending_input_to_first_pdu_at: Option<Instant> = None;
+    let mut last_input_to_pdu_ms = 0u128;
+    let mut worst_input_to_pdu_ms = 0u128;
+
+    let mut prev_processed_pdus = 0usize;
+    let mut prev_graphics_updates = 0usize;
+    let mut prev_response_frames = 0usize;
+    let mut prev_ui_frame_batches = 0usize;
+    let mut prev_ui_frame_updates = 0usize;
+    let mut prev_ui_frame_bytes = 0usize;
+    let mut prev_input_events = 0usize;
+    let mut prev_input_batches = 0usize;
 
     let summary = format!(
-        "\r\n[RDP] IronRDP handshake completed: server={} port={} desktop={}x{}\r\n",
-        host, port, width, height
+        "\r\n[RDP] IronRDP handshake completed: server={} port={} desktop={}x{} trace={}\r\n",
+        host, port, width, height, trace_enabled
     );
     let _ = tx_from_worker.send(ConnectionEvent::Data(summary.into_bytes()));
 
@@ -200,8 +229,49 @@ async fn run_rdp_worker_inner(
             _ = frame_tick.tick() => {
                 if let Some(rect) = pending_rect.take() {
                     if let Some(update) = rect_update_from_image(&image, rect) {
+                        ui_frame_batches += 1;
+                        ui_frame_updates += 1;
+                        ui_frame_bytes += frame_update_byte_len(&update);
                         let _ = tx_from_worker.send(ConnectionEvent::Frames(vec![update]));
                     }
+                }
+            }
+
+            _ = metrics_tick.tick() => {
+                if trace_enabled {
+                    let pdus_delta = processed_pdus.saturating_sub(prev_processed_pdus);
+                    let gfx_delta = graphics_updates.saturating_sub(prev_graphics_updates);
+                    let responses_delta = response_frames.saturating_sub(prev_response_frames);
+                    let ui_batches_delta = ui_frame_batches.saturating_sub(prev_ui_frame_batches);
+                    let ui_updates_delta = ui_frame_updates.saturating_sub(prev_ui_frame_updates);
+                    let ui_bytes_delta = ui_frame_bytes.saturating_sub(prev_ui_frame_bytes);
+                    let input_events_delta = input_events.saturating_sub(prev_input_events);
+                    let input_batches_delta = input_batches.saturating_sub(prev_input_batches);
+
+                    let summary = format!(
+                        "\r\n[RDP][METRICS] 2s pdus={} gfx={} rsp={} ui_batches={} ui_updates={} ui_kib={} input_events={} input_batches={} max_input_batch={} input_to_first_pdu_ms={} worst_input_to_first_pdu_ms={}\r\n",
+                        pdus_delta,
+                        gfx_delta,
+                        responses_delta,
+                        ui_batches_delta,
+                        ui_updates_delta,
+                        ui_bytes_delta / 1024,
+                        input_events_delta,
+                        input_batches_delta,
+                        max_input_batch,
+                        last_input_to_pdu_ms,
+                        worst_input_to_pdu_ms,
+                    );
+                    let _ = tx_from_worker.send(ConnectionEvent::Data(summary.into_bytes()));
+
+                    prev_processed_pdus = processed_pdus;
+                    prev_graphics_updates = graphics_updates;
+                    prev_response_frames = response_frames;
+                    prev_ui_frame_batches = ui_frame_batches;
+                    prev_ui_frame_updates = ui_frame_updates;
+                    prev_ui_frame_bytes = ui_frame_bytes;
+                    prev_input_events = input_events;
+                    prev_input_batches = input_batches;
                 }
             }
 
@@ -264,6 +334,8 @@ async fn run_rdp_worker_inner(
                     let _ = tx_from_worker.send(ConnectionEvent::Disconnected);
                     return Ok(());
                 };
+
+                let mut batch_size = 1usize;
                 // Track last known lock-key state for pre-keydown sync.
                 if let ConnectionInput::SyncKeyboardIndicators(ind) = &input {
                     last_indicators = Some(*ind);
@@ -282,6 +354,7 @@ async fn run_rdp_worker_inner(
                 loop {
                     match rx_from_iced.try_recv() {
                         Ok(inp) => {
+                            batch_size += 1;
                             if let ConnectionInput::SyncKeyboardIndicators(ind) = &inp {
                                 last_indicators = Some(*ind);
                             }
@@ -303,6 +376,15 @@ async fn run_rdp_worker_inner(
                         }
                     }
                 }
+
+                input_events += batch_size;
+                input_batches += 1;
+                max_input_batch = max_input_batch.max(batch_size);
+                pending_input_to_first_pdu_at = Some(Instant::now());
+
+                if trace_enabled && batch_size >= 32 {
+                    warn!("[RDP][METRICS] large local input burst: {} events", batch_size);
+                }
             }
 
             pdu_result = framed.read_pdu() => {
@@ -311,10 +393,23 @@ async fn run_rdp_worker_inner(
 
                 processed_pdus += 1;
 
+                if let Some(start) = pending_input_to_first_pdu_at.take() {
+                    last_input_to_pdu_ms = start.elapsed().as_millis();
+                    worst_input_to_pdu_ms = worst_input_to_pdu_ms.max(last_input_to_pdu_ms);
+                    if trace_enabled && last_input_to_pdu_ms >= 120 {
+                        warn!(
+                            "[RDP][METRICS] slow input->first-server-pdu: {} ms",
+                            last_input_to_pdu_ms
+                        );
+                    }
+                }
+
                 // --- PDU trace -----------------------------------------------
-                match action {
-                    Action::X224 => log_x224_pdu(&mut pdu_log, processed_pdus, &payload),
-                    Action::FastPath => log_fastpath_pdu(&mut pdu_log, processed_pdus, &payload),
+                if let Some(log) = pdu_log.as_mut() {
+                    match action {
+                        Action::X224 => log_x224_pdu(log, processed_pdus, &payload),
+                        Action::FastPath => log_fastpath_pdu(log, processed_pdus, &payload),
+                    }
                 }
 
                 let outputs = match active_stage.process(&mut image, action, &payload) {
@@ -325,6 +420,9 @@ async fn run_rdp_worker_inner(
                         if action == Action::X224 {
                             let frame_updates = try_handle_slowpath_bitmap(&payload);
                             if !frame_updates.is_empty() {
+                                ui_frame_batches += 1;
+                                ui_frame_updates += frame_updates.len();
+                                ui_frame_bytes += frame_updates.iter().map(frame_update_byte_len).sum::<usize>();
                                 let _ = tx_from_worker.send(ConnectionEvent::Frames(frame_updates));
                             }
                         } else {
@@ -395,6 +493,9 @@ async fn run_rdp_worker_inner(
         loop {
             match gfx_frame_rx.try_recv() {
                 Ok(frames) => {
+                    ui_frame_batches += 1;
+                    ui_frame_updates += frames.len();
+                    ui_frame_bytes += frames.iter().map(frame_update_byte_len).sum::<usize>();
                     let _ = tx_from_worker.send(ConnectionEvent::Frames(frames));
                 }
                 Err(_) => break,
@@ -547,6 +648,9 @@ async fn handle_rdp_input(
                 let events = db.apply([Operation::KeyReleased(sc)]);
                 process_fastpath_events(framed, active_stage, image, pending_rect, &events).await?;
             }
+        }
+        ConnectionInput::Shutdown => {
+            return Ok(());
         }
         ConnectionInput::Data(_) => {}
         ConnectionInput::RemoteInput(remote_input) => {
@@ -916,6 +1020,13 @@ fn rect_update_from_image(image: &DecodedImage, rect: InclusiveRectangle) -> Opt
         height,
         rgba: packed,
     })
+}
+
+fn frame_update_byte_len(update: &FrameUpdate) -> usize {
+    match update {
+        FrameUpdate::Full { rgba, .. } => rgba.len(),
+        FrameUpdate::Rect { rgba, .. } => rgba.len(),
+    }
 }
 
 type UpgradedFramed = Framed<MovableTokioStream<ironrdp_tls::TlsStream<tokio::net::TcpStream>>>;

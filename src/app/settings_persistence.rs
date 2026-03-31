@@ -42,6 +42,9 @@ pub struct SettingsData {
     #[serde(skip_serializing_if = "is_true")]
     pub vnc_remote_cursor: bool,
 
+    #[serde(skip_serializing_if = "is_false")]
+    pub vnc_use_copyrect: bool,
+
     #[serde(skip_serializing_if = "is_true")]
     pub vnc_shared_session: bool,
 
@@ -84,6 +87,33 @@ pub struct SettingsData {
 
     #[serde(skip_serializing_if = "is_default_10")]
     pub vnc_timeout: String,
+
+    #[serde(skip_serializing_if = "is_default_96")]
+    pub vnc_rect_collapse_threshold_default: String,
+
+    #[serde(skip_serializing_if = "is_default_512")]
+    pub vnc_max_events_per_tick_default: String,
+
+    #[serde(skip_serializing_if = "is_default_8")]
+    pub vnc_event_budget_ms_default: String,
+
+    #[serde(skip_serializing_if = "is_default_24")]
+    pub vnc_rect_collapse_threshold_remote_cursor: String,
+
+    #[serde(skip_serializing_if = "is_default_384")]
+    pub vnc_max_events_per_tick_remote_cursor: String,
+
+    #[serde(skip_serializing_if = "is_default_8")]
+    pub vnc_event_budget_ms_remote_cursor: String,
+
+    #[serde(skip_serializing_if = "is_default_24")]
+    pub vnc_rect_collapse_threshold_remote_cursor_copyrect: String,
+
+    #[serde(skip_serializing_if = "is_default_256")]
+    pub vnc_max_events_per_tick_remote_cursor_copyrect: String,
+
+    #[serde(skip_serializing_if = "is_default_8")]
+    pub vnc_event_budget_ms_remote_cursor_copyrect: String,
 }
 
 // ── skip_serializing_if helpers ──────────────────────────────────────────
@@ -100,6 +130,11 @@ fn is_default_1(v: &str) -> bool { v == "1" }
 fn is_default_none_str(v: &str) -> bool { v == "None" }
 fn is_default_32(v: &str) -> bool { v == "32" }
 fn is_default_10(v: &str) -> bool { v == "10" }
+fn is_default_96(v: &str) -> bool { v == "96" }
+fn is_default_512(v: &str) -> bool { v == "512" }
+fn is_default_24(v: &str) -> bool { v == "24" }
+fn is_default_384(v: &str) -> bool { v == "384" }
+fn is_default_256(v: &str) -> bool { v == "256" }
 
 // ── Default ──────────────────────────────────────────────────────────────
 
@@ -116,6 +151,7 @@ impl Default for SettingsData {
             rdp_font_smoothing: true,
             rdp_desktop_composition: true,
             vnc_remote_cursor: true,
+            vnc_use_copyrect: false,
             vnc_shared_session: true,
             vnc_view_only: false,
             theme_compact_tab_style: false,
@@ -130,6 +166,15 @@ impl Default for SettingsData {
             local_startup_args: String::new(),
             rdp_color_depth: "32".to_string(),
             vnc_timeout: "10".to_string(),
+            vnc_rect_collapse_threshold_default: "96".to_string(),
+            vnc_max_events_per_tick_default: "512".to_string(),
+            vnc_event_budget_ms_default: "8".to_string(),
+            vnc_rect_collapse_threshold_remote_cursor: "24".to_string(),
+            vnc_max_events_per_tick_remote_cursor: "384".to_string(),
+            vnc_event_budget_ms_remote_cursor: "8".to_string(),
+            vnc_rect_collapse_threshold_remote_cursor_copyrect: "24".to_string(),
+            vnc_max_events_per_tick_remote_cursor_copyrect: "256".to_string(),
+            vnc_event_budget_ms_remote_cursor_copyrect: "8".to_string(),
         }
     }
 }
@@ -150,6 +195,7 @@ impl SettingsData {
             rdp_font_smoothing: state.settings_rdp_font_smoothing,
             rdp_desktop_composition: state.settings_rdp_desktop_composition,
             vnc_remote_cursor: state.settings_vnc_remote_cursor,
+            vnc_use_copyrect: state.settings_vnc_use_copyrect,
             vnc_shared_session: state.settings_vnc_shared_session,
             vnc_view_only: state.settings_vnc_view_only,
             theme_compact_tab_style: state.settings_theme_compact_tab_style,
@@ -164,6 +210,29 @@ impl SettingsData {
             local_startup_args: state.settings_local_startup_args.clone(),
             rdp_color_depth: state.settings_rdp_color_depth.clone(),
             vnc_timeout: state.settings_vnc_timeout.clone(),
+            vnc_rect_collapse_threshold_default: state
+                .settings_vnc_rect_collapse_threshold_default
+                .clone(),
+            vnc_max_events_per_tick_default: state.settings_vnc_max_events_per_tick_default.clone(),
+            vnc_event_budget_ms_default: state.settings_vnc_event_budget_ms_default.clone(),
+            vnc_rect_collapse_threshold_remote_cursor: state
+                .settings_vnc_rect_collapse_threshold_remote_cursor
+                .clone(),
+            vnc_max_events_per_tick_remote_cursor: state
+                .settings_vnc_max_events_per_tick_remote_cursor
+                .clone(),
+            vnc_event_budget_ms_remote_cursor: state
+                .settings_vnc_event_budget_ms_remote_cursor
+                .clone(),
+            vnc_rect_collapse_threshold_remote_cursor_copyrect: state
+                .settings_vnc_rect_collapse_threshold_remote_cursor_copyrect
+                .clone(),
+            vnc_max_events_per_tick_remote_cursor_copyrect: state
+                .settings_vnc_max_events_per_tick_remote_cursor_copyrect
+                .clone(),
+            vnc_event_budget_ms_remote_cursor_copyrect: state
+                .settings_vnc_event_budget_ms_remote_cursor_copyrect
+                .clone(),
         }
     }
 
@@ -179,6 +248,7 @@ impl SettingsData {
         state.settings_rdp_font_smoothing = self.rdp_font_smoothing;
         state.settings_rdp_desktop_composition = self.rdp_desktop_composition;
         state.settings_vnc_remote_cursor = self.vnc_remote_cursor;
+        state.settings_vnc_use_copyrect = self.vnc_use_copyrect;
         state.settings_vnc_shared_session = self.vnc_shared_session;
         state.settings_vnc_view_only = self.vnc_view_only;
         state.settings_theme_compact_tab_style = self.theme_compact_tab_style;
@@ -193,6 +263,22 @@ impl SettingsData {
         state.settings_local_startup_args = self.local_startup_args.clone();
         state.settings_rdp_color_depth = self.rdp_color_depth.clone();
         state.settings_vnc_timeout = self.vnc_timeout.clone();
+        state.settings_vnc_rect_collapse_threshold_default =
+            self.vnc_rect_collapse_threshold_default.clone();
+        state.settings_vnc_max_events_per_tick_default = self.vnc_max_events_per_tick_default.clone();
+        state.settings_vnc_event_budget_ms_default = self.vnc_event_budget_ms_default.clone();
+        state.settings_vnc_rect_collapse_threshold_remote_cursor =
+            self.vnc_rect_collapse_threshold_remote_cursor.clone();
+        state.settings_vnc_max_events_per_tick_remote_cursor =
+            self.vnc_max_events_per_tick_remote_cursor.clone();
+        state.settings_vnc_event_budget_ms_remote_cursor =
+            self.vnc_event_budget_ms_remote_cursor.clone();
+        state.settings_vnc_rect_collapse_threshold_remote_cursor_copyrect =
+            self.vnc_rect_collapse_threshold_remote_cursor_copyrect.clone();
+        state.settings_vnc_max_events_per_tick_remote_cursor_copyrect =
+            self.vnc_max_events_per_tick_remote_cursor_copyrect.clone();
+        state.settings_vnc_event_budget_ms_remote_cursor_copyrect =
+            self.vnc_event_budget_ms_remote_cursor_copyrect.clone();
     }
 }
 

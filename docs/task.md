@@ -66,6 +66,11 @@
   - [ ] 클립보드 양방향 통합 (시스템 클립보드 연계)
   - [ ] 동적 해상도 변경(SetDesktopSize) 지원
   - [ ] 인코딩 확장(Tight/ZRLE) 및 서버별 호환성 검증
+    - [x] ZRLE/Tight 인코딩 협상 체인 적용 (`src/connection/vnc.rs`)
+    - [x] JPEG 이벤트 계측 로그 추가 (`VncEvent::JpegImage`)
+    - [x] VNC 성능 계측 로그 추가(5s 주기 메트릭)
+    - [ ] 서버별 매트릭스 검증(TigerVNC/x11vnc/TightVNC/UltraVNC)
+    - [ ] 인코딩 우선순위 정책 확정(ZRLE 우선 vs Tight 우선)
   - [ ] 자동 재연결/복구 UX 및 장애 시나리오 검증
 - [ ] 15단계: UI/UX 고도화 
   - [ ] 마우스 기반 탭 분할(Drag to Split) 및 레이아웃 관리 기능

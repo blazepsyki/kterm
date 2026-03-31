@@ -21,7 +21,19 @@ const VNC_AUTH_PASSWORD_LIMIT: usize = 8;
 const VNC_CONSERVATIVE_FULL_UPLOAD: bool = false;
 const VNC_HEAL_FULL_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const VNC_RECT_ONLY_STREAK_FORCE_THRESHOLD: u32 = 6;
-const VNC_RECT_BATCH_FORCE_THRESHOLD: usize = 64;
+const VNC_RECT_COLLAPSE_THRESHOLD_DEFAULT: usize = 96;
+const VNC_RECT_COLLAPSE_THRESHOLD_CURSOR: usize = 24;
+const VNC_MAX_EVENTS_PER_TICK_DEFAULT: usize = 512;
+const VNC_MAX_EVENTS_PER_TICK_CURSOR: usize = 384;
+const VNC_MAX_EVENTS_PER_TICK_CURSOR_COPYRECT: usize = 256;
+const VNC_EVENT_BUDGET_PER_TICK_DEFAULT: Duration = Duration::from_millis(8);
+const VNC_EVENT_BUDGET_PER_TICK_CURSOR: Duration = Duration::from_millis(8);
+const VNC_RECT_COLLAPSE_THRESHOLD_CURSOR_COPYRECT: usize = 24;
+const VNC_EVENT_BUDGET_PER_TICK_CURSOR_COPYRECT: Duration = Duration::from_millis(8);
+const VNC_RECONNECT_BASE_DELAY: Duration = Duration::from_secs(1);
+const VNC_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(8);
+const VNC_RECONNECT_MAX_ATTEMPTS: u32 = 5;
+const VNC_METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Default)]
 struct VncFramebuffer {
@@ -77,20 +89,69 @@ impl VncCursorState {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct VncRuntimeTuning {
+    pub rect_collapse_threshold_default: usize,
+    pub max_events_per_tick_default: usize,
+    pub event_budget_per_tick_default: Duration,
+    pub rect_collapse_threshold_remote_cursor: usize,
+    pub max_events_per_tick_remote_cursor: usize,
+    pub event_budget_per_tick_remote_cursor: Duration,
+    pub rect_collapse_threshold_remote_cursor_copyrect: usize,
+    pub max_events_per_tick_remote_cursor_copyrect: usize,
+    pub event_budget_per_tick_remote_cursor_copyrect: Duration,
+}
+
+impl Default for VncRuntimeTuning {
+    fn default() -> Self {
+        Self {
+            rect_collapse_threshold_default: VNC_RECT_COLLAPSE_THRESHOLD_DEFAULT,
+            max_events_per_tick_default: VNC_MAX_EVENTS_PER_TICK_DEFAULT,
+            event_budget_per_tick_default: VNC_EVENT_BUDGET_PER_TICK_DEFAULT,
+            rect_collapse_threshold_remote_cursor: VNC_RECT_COLLAPSE_THRESHOLD_CURSOR,
+            max_events_per_tick_remote_cursor: VNC_MAX_EVENTS_PER_TICK_CURSOR,
+            event_budget_per_tick_remote_cursor: VNC_EVENT_BUDGET_PER_TICK_CURSOR,
+            rect_collapse_threshold_remote_cursor_copyrect:
+                VNC_RECT_COLLAPSE_THRESHOLD_CURSOR_COPYRECT,
+            max_events_per_tick_remote_cursor_copyrect: VNC_MAX_EVENTS_PER_TICK_CURSOR_COPYRECT,
+            event_budget_per_tick_remote_cursor_copyrect:
+                VNC_EVENT_BUDGET_PER_TICK_CURSOR_COPYRECT,
+        }
+    }
+}
+
 pub fn connect_and_subscribe(
     host: String,
     port: u16,
     password: Option<String>,
     remote_cursor: bool,
+    use_copyrect: bool,
     shared_session: bool,
     view_only: bool,
     timeout_secs: u64,
+    tuning: VncRuntimeTuning,
+    auto_reconnect: bool,
 ) -> futures::stream::BoxStream<'static, ConnectionEvent> {
     let (tx_to_vnc, rx_from_iced) = mpsc::unbounded_channel::<ConnectionInput>();
     let (tx_from_worker, rx_from_worker) = mpsc::unbounded_channel::<ConnectionEvent>();
 
     tokio::spawn(async move {
-        run_vnc_worker(host, port, password, rx_from_iced, tx_from_worker, tx_to_vnc, remote_cursor, shared_session, view_only, timeout_secs).await;
+        run_vnc_worker(
+            host,
+            port,
+            password,
+            rx_from_iced,
+            tx_from_worker,
+            tx_to_vnc,
+            remote_cursor,
+            use_copyrect,
+            shared_session,
+            view_only,
+            timeout_secs,
+            tuning,
+            auto_reconnect,
+        )
+        .await;
     });
 
     // Merge consecutive frame batches to reduce UI handle churn.
@@ -136,31 +197,101 @@ async fn run_vnc_worker(
     host: String,
     port: u16,
     password: Option<String>,
-    rx_from_iced: mpsc::UnboundedReceiver<ConnectionInput>,
+    mut rx_from_iced: mpsc::UnboundedReceiver<ConnectionInput>,
     tx_from_worker: mpsc::UnboundedSender<ConnectionEvent>,
     tx_to_vnc: mpsc::UnboundedSender<ConnectionInput>,
     remote_cursor: bool,
+    use_copyrect: bool,
     shared_session: bool,
     view_only: bool,
     timeout_secs: u64,
+    tuning: VncRuntimeTuning,
+    auto_reconnect: bool,
 ) {
-    let tx_err = tx_from_worker.clone();
-    if let Err(err) = run_vnc_worker_inner(host, port, password, rx_from_iced, tx_from_worker, tx_to_vnc, remote_cursor, shared_session, view_only, timeout_secs).await {
-        let _ = tx_err.send(ConnectionEvent::Error(err));
+    let mut reconnect_attempt = 0u32;
+
+    loop {
+        let run_result = run_vnc_worker_inner(
+            host.clone(),
+            port,
+            password.clone(),
+            &mut rx_from_iced,
+            tx_from_worker.clone(),
+            tx_to_vnc.clone(),
+            remote_cursor,
+            use_copyrect,
+            shared_session,
+            view_only,
+            timeout_secs,
+            tuning,
+        )
+        .await;
+
+        match run_result {
+            Ok(()) => break,
+            Err(err) => {
+                let retryable = auto_reconnect && !is_non_retryable_vnc_error(&err);
+                if !retryable {
+                    let _ = tx_from_worker.send(ConnectionEvent::Error(err));
+                    break;
+                }
+
+                reconnect_attempt = reconnect_attempt.saturating_add(1);
+                if reconnect_attempt > VNC_RECONNECT_MAX_ATTEMPTS {
+                    let final_err = format!(
+                        "VNC reconnect exhausted after {} attempts: {}",
+                        VNC_RECONNECT_MAX_ATTEMPTS, err
+                    );
+                    let _ = tx_from_worker.send(ConnectionEvent::Error(final_err));
+                    break;
+                }
+
+                let base = VNC_RECONNECT_BASE_DELAY.as_secs().max(1);
+                let exp = 1u64 << reconnect_attempt.saturating_sub(1);
+                let backoff_secs = base.saturating_mul(exp);
+                let delay = Duration::from_secs(backoff_secs.min(VNC_RECONNECT_MAX_DELAY.as_secs()));
+
+                let notice = format!(
+                    "\r\n[VNC] Connection lost: {}\r\n[VNC] Auto-reconnect attempt {}/{} in {}s...\r\n",
+                    err,
+                    reconnect_attempt,
+                    VNC_RECONNECT_MAX_ATTEMPTS,
+                    delay.as_secs()
+                );
+                let _ = tx_from_worker.send(ConnectionEvent::Data(notice.into_bytes()));
+                warn!(
+                    "[VNC] reconnect attempt {}/{} in {}s: {}",
+                    reconnect_attempt,
+                    VNC_RECONNECT_MAX_ATTEMPTS,
+                    delay.as_secs(),
+                    err
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
     }
+}
+
+fn is_non_retryable_vnc_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("authentication failed")
+        || lower.contains("password")
+        || lower.contains("security negotiation failed")
 }
 
 async fn run_vnc_worker_inner(
     host: String,
     port: u16,
     password: Option<String>,
-    mut rx_from_iced: mpsc::UnboundedReceiver<ConnectionInput>,
+    rx_from_iced: &mut mpsc::UnboundedReceiver<ConnectionInput>,
     tx_from_worker: mpsc::UnboundedSender<ConnectionEvent>,
     tx_to_vnc: mpsc::UnboundedSender<ConnectionInput>,
     remote_cursor: bool,
+    use_copyrect: bool,
     shared_session: bool,
     view_only: bool,
     timeout_secs: u64,
+    tuning: VncRuntimeTuning,
 ) -> Result<(), String> {
     info!("[VNC] connecting to {}:{}", host, port);
 
@@ -190,13 +321,20 @@ async fn run_vnc_worker_inner(
         ));
     }
 
+    let copyrect_enabled = use_copyrect;
+
     let mut vnc_builder = VncConnector::new(tcp)
         .set_auth_method(async move { Ok::<String, VncError>(auth_password) })
         .set_pixel_format(PixelFormat::rgba())
         .allow_shared(shared_session)
-        .add_encoding(VncEncoding::CopyRect)
+        .add_encoding(VncEncoding::Zrle)
+        .add_encoding(VncEncoding::Tight)
         .add_encoding(VncEncoding::Raw)
         .add_encoding(VncEncoding::DesktopSizePseudo);
+
+    if copyrect_enabled {
+        vnc_builder = vnc_builder.add_encoding(VncEncoding::CopyRect);
+    }
 
     if remote_cursor {
         vnc_builder = vnc_builder.add_encoding(VncEncoding::CursorPseudo);
@@ -213,10 +351,15 @@ async fn run_vnc_worker_inner(
 
     let _ = tx_from_worker.send(ConnectionEvent::Connected(tx_to_vnc));
 
-    let encodings_desc = if remote_cursor {
-        "CopyRect, Raw, DesktopSize, CursorPseudo"
+    let base_encodings = if copyrect_enabled {
+        "ZRLE, Tight, CopyRect, Raw, DesktopSize"
     } else {
-        "CopyRect, Raw, DesktopSize"
+        "ZRLE, Tight, Raw, DesktopSize"
+    };
+    let encodings_desc = if remote_cursor {
+        format!("{}, CursorPseudo", base_encodings)
+    } else {
+        base_encodings.to_string()
     };
     let summary = format!(
         "\r\n[VNC] Connected: {}:{} (encodings: {}{})\r\n",
@@ -235,9 +378,21 @@ async fn run_vnc_worker_inner(
     let mut cursor = VncCursorState::default();
     let mut remote_lock_state: Option<KeyboardIndicators> = None;
     let mut key_state = VncKeyState::default();
+    let mut pointer_move_pending = false;
     let mut refresh = tokio::time::interval(VNC_REFRESH_INTERVAL);
     let mut last_full_refresh = tokio::time::Instant::now();
+    let mut last_metrics_log = tokio::time::Instant::now();
     let mut rect_only_streak = 0u32;
+    let mut bootstrap_full_refresh_retries = 2u8;
+    let mut cursor_motion_dirty = false;
+    let mut metrics_ticks = 0usize;
+    let mut metrics_events = 0usize;
+    let mut metrics_full = 0usize;
+    let mut metrics_rect = 0usize;
+    let mut metrics_forced_full_batches = 0usize;
+    let mut metrics_rect_collapse_batches = 0usize;
+    let mut metrics_budget_hit_batches = 0usize;
+    let mut metrics_jpeg_events = 0usize;
     refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
@@ -245,6 +400,10 @@ async fn run_vnc_worker_inner(
             input = rx_from_iced.recv() => {
                 match input {
                     Some(input) => {
+                        if matches!(input, ConnectionInput::Shutdown) {
+                            info!("[VNC] shutdown requested; closing session");
+                            break;
+                        }
                         // In view-only mode, suppress keyboard/mouse input
                         let should_skip = view_only && matches!(
                             &input,
@@ -253,12 +412,11 @@ async fn run_vnc_worker_inner(
                         if !should_skip {
                             handle_connection_input(
                                 &vnc,
-                                &tx_from_worker,
-                                &framebuffer,
-                                &mut cursor,
                                 &mut pointer,
                                 &mut remote_lock_state,
                                 &mut key_state,
+                                &mut cursor_motion_dirty,
+                                &mut pointer_move_pending,
                                 input,
                             )
                             .await?;
@@ -271,6 +429,13 @@ async fn run_vnc_worker_inner(
                 }
             }
             _ = refresh.tick() => {
+                if pointer_move_pending {
+                    send_pointer(&vnc, pointer.x, pointer.y, pointer.buttons)
+                        .await
+                        .map_err(|e| format!("VNC pointer flush failed: {}", e))?;
+                    pointer_move_pending = false;
+                }
+
                 let use_full_refresh = last_full_refresh.elapsed() >= VNC_HEAL_FULL_REFRESH_INTERVAL;
                 let req = if use_full_refresh {
                     X11Event::FullRefresh
@@ -288,10 +453,45 @@ async fn run_vnc_worker_inner(
 
                 let mut pending_updates = Vec::new();
                 let mut request_sync_refresh = false;
+                let mut cursor_dirty = false;
+                let mut jpeg_event_count = 0usize;
+                let mut event_budget_hit = false;
+                let max_events_per_tick = if remote_cursor {
+                    if copyrect_enabled {
+                        tuning.max_events_per_tick_remote_cursor_copyrect
+                    } else {
+                        tuning.max_events_per_tick_remote_cursor
+                    }
+                } else {
+                    tuning.max_events_per_tick_default
+                };
+                let event_budget_per_tick = if remote_cursor {
+                    if copyrect_enabled {
+                        tuning.event_budget_per_tick_remote_cursor_copyrect
+                    } else {
+                        tuning.event_budget_per_tick_remote_cursor
+                    }
+                } else {
+                    tuning.event_budget_per_tick_default
+                };
+                let event_loop_start = tokio::time::Instant::now();
+                let mut events_processed_this_tick = 0usize;
 
                 loop {
+                    if events_processed_this_tick >= max_events_per_tick
+                        || event_loop_start.elapsed() >= event_budget_per_tick
+                    {
+                        event_budget_hit = true;
+                        break;
+                    }
+
                     match vnc.poll_event().await {
                         Ok(Some(event)) => {
+                            metrics_events += 1;
+                            events_processed_this_tick += 1;
+                            if matches!(&event, VncEvent::JpegImage(_, _)) {
+                                jpeg_event_count += 1;
+                            }
                             let effect = handle_vnc_event(
                                 &tx_from_worker,
                                 &mut framebuffer,
@@ -302,6 +502,7 @@ async fn run_vnc_worker_inner(
                             .await?;
                             pending_updates.extend(effect.updates);
                             request_sync_refresh |= effect.request_sync_refresh;
+                            cursor_dirty |= effect.cursor_dirty;
                         }
                         Ok(None) => break,
                         Err(e) => {
@@ -310,13 +511,108 @@ async fn run_vnc_worker_inner(
                     }
                 }
 
-                maybe_promote_vnc_updates_to_full(
+                if jpeg_event_count > 0 {
+                    metrics_jpeg_events += jpeg_event_count;
+                    warn!(
+                        "[VNC] received {} JPEG event(s) in one refresh tick (decoder path not enabled yet)",
+                        jpeg_event_count
+                    );
+                }
+
+                if event_budget_hit {
+                    metrics_budget_hit_batches += 1;
+                }
+
+                let forced_promotion = maybe_promote_vnc_updates_to_full(
                     &mut pending_updates,
                     &framebuffer,
-                    &mut cursor,
-                    &pointer,
+                    !remote_cursor,
                     &mut rect_only_streak,
                 );
+
+                if cursor_motion_dirty || cursor_dirty {
+                    compose_cursor_overlay_for_tick(
+                        &mut pending_updates,
+                        &framebuffer,
+                        &mut cursor,
+                        &pointer,
+                        cursor_dirty,
+                    );
+                    cursor_motion_dirty = false;
+                }
+
+                let rect_collapse_threshold = if remote_cursor {
+                    if copyrect_enabled {
+                        tuning.rect_collapse_threshold_remote_cursor_copyrect
+                    } else {
+                        tuning.rect_collapse_threshold_remote_cursor
+                    }
+                } else {
+                    tuning.rect_collapse_threshold_default
+                };
+
+                if maybe_collapse_rect_updates(
+                    &mut pending_updates,
+                    &framebuffer,
+                    rect_collapse_threshold,
+                ) {
+                    metrics_rect_collapse_batches += 1;
+                }
+
+                metrics_ticks += 1;
+                let has_full_update = pending_updates
+                    .iter()
+                    .any(|u| matches!(u, FrameUpdate::Full { .. }));
+
+                if has_full_update {
+                    bootstrap_full_refresh_retries = 0;
+                } else if bootstrap_full_refresh_retries > 0 && !pending_updates.is_empty() {
+                    vnc.input(X11Event::FullRefresh)
+                        .await
+                        .map_err(|e| format!("VNC bootstrap full refresh retry failed: {}", e))?;
+                    bootstrap_full_refresh_retries = bootstrap_full_refresh_retries.saturating_sub(1);
+                    last_full_refresh = tokio::time::Instant::now();
+                }
+
+                if forced_promotion {
+                    metrics_forced_full_batches += 1;
+                }
+                for update in &pending_updates {
+                    match update {
+                        FrameUpdate::Full { .. } => metrics_full += 1,
+                        FrameUpdate::Rect { .. } => metrics_rect += 1,
+                    }
+                }
+
+                if last_metrics_log.elapsed() >= VNC_METRICS_LOG_INTERVAL {
+                    info!(
+                        "[VNC][METRICS] copyrect_enabled={} remote_cursor={} promotion_enabled={} rect_collapse_threshold={} max_events_per_tick={} event_budget_ms={} ticks={} events={} full={} rect={} forced_full_batches={} rect_collapse_batches={} budget_hit_batches={} jpeg_events={} rect_only_streak={}",
+                        copyrect_enabled,
+                        remote_cursor,
+                        !remote_cursor,
+                        rect_collapse_threshold,
+                        max_events_per_tick,
+                        event_budget_per_tick.as_millis(),
+                        metrics_ticks,
+                        metrics_events,
+                        metrics_full,
+                        metrics_rect,
+                        metrics_forced_full_batches,
+                        metrics_rect_collapse_batches,
+                        metrics_budget_hit_batches,
+                        metrics_jpeg_events,
+                        rect_only_streak
+                    );
+                    metrics_ticks = 0;
+                    metrics_events = 0;
+                    metrics_full = 0;
+                    metrics_rect = 0;
+                    metrics_forced_full_batches = 0;
+                    metrics_rect_collapse_batches = 0;
+                    metrics_budget_hit_batches = 0;
+                    metrics_jpeg_events = 0;
+                    last_metrics_log = tokio::time::Instant::now();
+                }
 
                 if !pending_updates.is_empty() {
                     let _ = tx_from_worker.send(ConnectionEvent::Frames(pending_updates));
@@ -374,13 +670,14 @@ impl VncKeyState {
 struct VncEventEffect {
     updates: Vec<FrameUpdate>,
     request_sync_refresh: bool,
+    cursor_dirty: bool,
 }
 
 async fn handle_vnc_event(
     tx_from_worker: &mpsc::UnboundedSender<ConnectionEvent>,
     framebuffer: &mut VncFramebuffer,
     cursor: &mut VncCursorState,
-    pointer: &PointerState,
+    _pointer: &PointerState,
     event: VncEvent,
 ) -> Result<VncEventEffect, String> {
     match event {
@@ -398,6 +695,7 @@ async fn handle_vnc_event(
                     rgba,
                 }],
                 request_sync_refresh: false,
+                cursor_dirty: true,
             });
         }
         VncEvent::RawImage(rect, data) => {
@@ -419,7 +717,7 @@ async fn handle_vnc_event(
 
             write_raw_rect_to_framebuffer(framebuffer, rect.x, rect.y, rect.width, rect.height, &rgba);
 
-            let mut updates = if VNC_CONSERVATIVE_FULL_UPLOAD {
+            let updates = if VNC_CONSERVATIVE_FULL_UPLOAD {
                 framebuffer
                     .as_full_update()
                     .map(|f| vec![f])
@@ -434,13 +732,10 @@ async fn handle_vnc_event(
                 }]
             };
 
-            if let Some(overlay) = draw_cursor_overlay_update(framebuffer, cursor, pointer) {
-                updates.push(overlay);
-            }
-
             return Ok(VncEventEffect {
                 updates,
                 request_sync_refresh: false,
+                cursor_dirty: true,
             });
         }
         VncEvent::SetPixelFormat(format) => {
@@ -474,25 +769,10 @@ async fn handle_vnc_event(
             let request_sync_refresh = cursor.needs_cursor_sync_full_refresh;
             cursor.needs_cursor_sync_full_refresh = false;
 
-            let previous = cursor.last_rect;
-            let next = compute_cursor_rect(framebuffer, cursor, pointer);
-
-            let mut updates = Vec::new();
-            if previous != next {
-                if let Some(old) = previous {
-                    if let Some(restore) = framebuffer_rect_update(framebuffer, old) {
-                        updates.push(restore);
-                    }
-                }
-            }
-
-            if let Some(overlay) = draw_cursor_overlay_update(framebuffer, cursor, pointer) {
-                updates.push(overlay);
-            }
-
             return Ok(VncEventEffect {
-                updates,
+                updates: Vec::new(),
                 request_sync_refresh,
+                cursor_dirty: true,
             });
         }
         VncEvent::Copy(dst, src) => {
@@ -505,7 +785,7 @@ async fn handle_vnc_event(
                 dst.width.min(src.width),
                 dst.height.min(src.height),
             ) {
-                let mut updates = if VNC_CONSERVATIVE_FULL_UPLOAD {
+                let updates = if VNC_CONSERVATIVE_FULL_UPLOAD {
                     framebuffer
                         .as_full_update()
                         .map(|f| vec![f])
@@ -513,18 +793,23 @@ async fn handle_vnc_event(
                 } else {
                     vec![copied]
                 };
-                if let Some(overlay) = draw_cursor_overlay_update(framebuffer, cursor, pointer) {
-                    updates.push(overlay);
-                }
                 return Ok(VncEventEffect {
                     updates,
                     request_sync_refresh: false,
+                    cursor_dirty: true,
                 });
             }
             return Ok(VncEventEffect::default());
         }
-        VncEvent::JpegImage(_, _) => {
-            // Tight/JPEG is not negotiated in the MVP stage.
+        VncEvent::JpegImage(rect, data) => {
+            warn!(
+                "[VNC] JPEG image event received: rect={}x{} at ({}, {}), bytes={} (ignored)",
+                rect.width,
+                rect.height,
+                rect.x,
+                rect.y,
+                data.len()
+            );
             return Ok(VncEventEffect::default());
         }
         VncEvent::Error(msg) => {
@@ -545,18 +830,24 @@ async fn handle_vnc_event(
 
 async fn handle_connection_input(
     vnc: &VncClient,
-    tx_from_worker: &mpsc::UnboundedSender<ConnectionEvent>,
-    framebuffer: &VncFramebuffer,
-    cursor: &mut VncCursorState,
     pointer: &mut PointerState,
     remote_lock_state: &mut Option<KeyboardIndicators>,
     key_state: &mut VncKeyState,
+    cursor_motion_dirty: &mut bool,
+    pointer_move_pending: &mut bool,
     input: ConnectionInput,
 ) -> Result<(), String> {
     match input {
         ConnectionInput::RemoteInput(remote) => {
-            handle_remote_input(vnc, tx_from_worker, framebuffer, cursor, pointer, key_state, remote)
-                .await
+            handle_remote_input(
+                vnc,
+                pointer,
+                key_state,
+                cursor_motion_dirty,
+                pointer_move_pending,
+                remote,
+            )
+            .await
         }
         ConnectionInput::Data(bytes) => {
             // Paste path: send UTF-8 text as keysyms.
@@ -593,16 +884,16 @@ async fn handle_connection_input(
             }
             Ok(())
         }
+        ConnectionInput::Shutdown => Ok(()),
     }
 }
 
 async fn handle_remote_input(
     vnc: &VncClient,
-    tx_from_worker: &mpsc::UnboundedSender<ConnectionEvent>,
-    framebuffer: &VncFramebuffer,
-    cursor: &mut VncCursorState,
     pointer: &mut PointerState,
     key_state: &mut VncKeyState,
+    cursor_motion_dirty: &mut bool,
+    pointer_move_pending: &mut bool,
     remote: RemoteInput,
 ) -> Result<(), String> {
     match remote {
@@ -644,26 +935,8 @@ async fn handle_remote_input(
         RemoteInput::MouseMove { x, y } => {
             pointer.x = x;
             pointer.y = y;
-            send_pointer(vnc, pointer.x, pointer.y, pointer.buttons).await?;
-
-            let previous = cursor.last_rect;
-            let next = compute_cursor_rect(framebuffer, cursor, pointer);
-            if previous == next {
-                return Ok(());
-            }
-
-            let mut updates = Vec::new();
-            if let Some(old) = previous {
-                if let Some(restore) = framebuffer_rect_update(framebuffer, old) {
-                    updates.push(restore);
-                }
-            }
-            if let Some(overlay) = draw_cursor_overlay_update(framebuffer, cursor, pointer) {
-                updates.push(overlay);
-            }
-            if !updates.is_empty() {
-                let _ = tx_from_worker.send(ConnectionEvent::Frames(updates));
-            }
+            *cursor_motion_dirty = true;
+            *pointer_move_pending = true;
             Ok(())
         }
         RemoteInput::MouseButton { button, down } => {
@@ -708,10 +981,13 @@ fn wheel_steps(delta: i16) -> usize {
 fn maybe_promote_vnc_updates_to_full(
     updates: &mut Vec<FrameUpdate>,
     framebuffer: &VncFramebuffer,
-    cursor: &mut VncCursorState,
-    pointer: &PointerState,
+    enabled: bool,
     rect_only_streak: &mut u32,
-) {
+) -> bool {
+    if !enabled {
+        return false;
+    }
+
     let full_count = updates
         .iter()
         .filter(|update| matches!(update, FrameUpdate::Full { .. }))
@@ -723,37 +999,30 @@ fn maybe_promote_vnc_updates_to_full(
 
     if full_count > 0 {
         *rect_only_streak = 0;
-        return;
+        return false;
     }
 
     if rect_count == 0 {
-        return;
+        return false;
     }
 
     *rect_only_streak = rect_only_streak.saturating_add(1);
 
-    let reason = if rect_count >= VNC_RECT_BATCH_FORCE_THRESHOLD {
-        Some("vnc_rect_batch")
-    } else if *rect_only_streak >= VNC_RECT_ONLY_STREAK_FORCE_THRESHOLD {
+    let reason = if *rect_only_streak >= VNC_RECT_ONLY_STREAK_FORCE_THRESHOLD {
         Some("vnc_rect_only_streak")
     } else {
         None
     };
 
     let Some(reason) = reason else {
-        return;
+        return false;
     };
 
     let Some(full_update) = framebuffer.as_full_update() else {
-        return;
+        return false;
     };
 
-    let mut promoted_updates = vec![full_update];
-    if let Some(overlay) = draw_cursor_overlay_update(framebuffer, cursor, pointer) {
-        promoted_updates.push(overlay);
-    }
-
-    *updates = promoted_updates;
+    *updates = vec![full_update];
     *rect_only_streak = 0;
 
     if crate::rdp_trace_enabled() {
@@ -763,6 +1032,78 @@ fn maybe_promote_vnc_updates_to_full(
             rect_count,
         );
     }
+
+    true
+}
+
+fn maybe_collapse_rect_updates(
+    updates: &mut Vec<FrameUpdate>,
+    framebuffer: &VncFramebuffer,
+    threshold: usize,
+) -> bool {
+    if updates.iter().any(|u| matches!(u, FrameUpdate::Full { .. })) {
+        return false;
+    }
+
+    let rect_count = updates
+        .iter()
+        .filter(|u| matches!(u, FrameUpdate::Rect { .. }))
+        .count();
+
+    if rect_count < threshold {
+        return false;
+    }
+
+    let Some(bounds) = rect_union_bounds(updates) else {
+        return false;
+    };
+
+    let Some(collapsed) = framebuffer_rect_update(framebuffer, bounds) else {
+        return false;
+    };
+
+    *updates = vec![collapsed];
+    true
+}
+
+fn rect_union_bounds(updates: &[FrameUpdate]) -> Option<CursorRect> {
+    let mut min_x = u16::MAX;
+    let mut min_y = u16::MAX;
+    let mut max_x = 0u16;
+    let mut max_y = 0u16;
+    let mut found = false;
+
+    for update in updates {
+        if let FrameUpdate::Rect {
+            x,
+            y,
+            width,
+            height,
+            ..
+        } = update
+        {
+            if *width == 0 || *height == 0 {
+                continue;
+            }
+            found = true;
+
+            min_x = min_x.min(*x);
+            min_y = min_y.min(*y);
+            max_x = max_x.max(x.saturating_add(*width));
+            max_y = max_y.max(y.saturating_add(*height));
+        }
+    }
+
+    if !found || max_x <= min_x || max_y <= min_y {
+        return None;
+    }
+
+    Some(CursorRect {
+        x: min_x,
+        y: min_y,
+        width: max_x.saturating_sub(min_x),
+        height: max_y.saturating_sub(min_y),
+    })
 }
 
 async fn send_key(vnc: &VncClient, keycode: u32, down: bool) -> Result<(), String> {
@@ -1247,4 +1588,32 @@ fn copy_rect_in_framebuffer(
         height: copy_h,
         rgba: temp,
     })
+}
+
+fn compose_cursor_overlay_for_tick(
+    updates: &mut Vec<FrameUpdate>,
+    framebuffer: &VncFramebuffer,
+    cursor: &mut VncCursorState,
+    pointer: &PointerState,
+    cursor_dirty: bool,
+) {
+    let previous = cursor.last_rect;
+    let next = compute_cursor_rect(framebuffer, cursor, pointer);
+    let moved = previous != next;
+    if !moved && !cursor_dirty {
+        return;
+    }
+
+    if moved {
+        if let Some(old) = previous {
+            if let Some(restore) = framebuffer_rect_update(framebuffer, old) {
+                updates.push(restore);
+            }
+        }
+    }
+    if let Some(overlay) = draw_cursor_overlay_update(framebuffer, cursor, pointer) {
+        updates.push(overlay);
+    } else {
+        cursor.last_rect = None;
+    }
 }

@@ -27,6 +27,9 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             // Explicitly drop the sender before removing so the worker receives
             // the channel-closed signal and exits its recv() loop immediately.
             if let Some(session) = state.sessions.get_mut(index) {
+                if let Some(sender) = session.sender.as_ref() {
+                    let _ = sender.send(connection::ConnectionInput::Shutdown);
+                }
                 session.sender = None;
                 // Clean up the native clipboard window for this session.
                 platform::windows::remove_clipboard_for_session(session.id);
@@ -462,9 +465,66 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             let pass = state.vnc_pass.clone();
             let pass_opt = if pass.is_empty() { None } else { Some(pass) };
             let remote_cursor = state.settings_vnc_remote_cursor;
+            let use_copyrect = state.settings_vnc_use_copyrect;
             let shared_session = state.settings_vnc_shared_session;
             let view_only = state.settings_vnc_view_only;
             let timeout_secs: u64 = state.settings_vnc_timeout.parse().unwrap_or(10);
+            let tuning = connection::vnc::VncRuntimeTuning {
+                rect_collapse_threshold_default: parse_usize_in_range(
+                    &state.settings_vnc_rect_collapse_threshold_default,
+                    1,
+                    4096,
+                    96,
+                ),
+                max_events_per_tick_default: parse_usize_in_range(
+                    &state.settings_vnc_max_events_per_tick_default,
+                    1,
+                    8192,
+                    512,
+                ),
+                event_budget_per_tick_default: std::time::Duration::from_millis(parse_u64_in_range(
+                    &state.settings_vnc_event_budget_ms_default,
+                    1,
+                    100,
+                    8,
+                )),
+                rect_collapse_threshold_remote_cursor: parse_usize_in_range(
+                    &state.settings_vnc_rect_collapse_threshold_remote_cursor,
+                    1,
+                    4096,
+                    24,
+                ),
+                max_events_per_tick_remote_cursor: parse_usize_in_range(
+                    &state.settings_vnc_max_events_per_tick_remote_cursor,
+                    1,
+                    8192,
+                    384,
+                ),
+                event_budget_per_tick_remote_cursor: std::time::Duration::from_millis(
+                    parse_u64_in_range(&state.settings_vnc_event_budget_ms_remote_cursor, 1, 100, 8),
+                ),
+                rect_collapse_threshold_remote_cursor_copyrect: parse_usize_in_range(
+                    &state.settings_vnc_rect_collapse_threshold_remote_cursor_copyrect,
+                    1,
+                    4096,
+                    24,
+                ),
+                max_events_per_tick_remote_cursor_copyrect: parse_usize_in_range(
+                    &state.settings_vnc_max_events_per_tick_remote_cursor_copyrect,
+                    1,
+                    8192,
+                    256,
+                ),
+                event_budget_per_tick_remote_cursor_copyrect: std::time::Duration::from_millis(
+                    parse_u64_in_range(
+                        &state.settings_vnc_event_budget_ms_remote_cursor_copyrect,
+                        1,
+                        100,
+                        8,
+                    ),
+                ),
+            };
+            let auto_reconnect = state.settings_auto_reconnect;
             let name = format!("VNC: {}:{}", host, port);
 
             let target_index = state.active_index;
@@ -487,7 +547,13 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 Task::run(
                     connection::vnc::connect_and_subscribe(
                         host, port, pass_opt,
-                        remote_cursor, shared_session, view_only, timeout_secs,
+                        remote_cursor,
+                        use_copyrect,
+                        shared_session,
+                        view_only,
+                        timeout_secs,
+                        tuning,
+                        auto_reconnect,
                     ),
                     move |event| Message::ConnectionMessage(target_id, event),
                 )
@@ -768,6 +834,24 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
     }
+}
+
+fn parse_usize_in_range(value: &str, min: usize, max: usize, default: usize) -> usize {
+    value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|v| *v >= min && *v <= max)
+        .unwrap_or(default)
+}
+
+fn parse_u64_in_range(value: &str, min: u64, max: u64, default: u64) -> u64 {
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|v| *v >= min && *v <= max)
+        .unwrap_or(default)
 }
 
 fn transform_remote_mouse(
