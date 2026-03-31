@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use env_logger::Env;
 use iced::{window, Task};
@@ -29,13 +30,18 @@ pub(crate) const RDP_RESOLUTION_PRESETS: &[(u16, u16)] = &[
 static RDP_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
 static SESSION_LOG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
 static SESSION_LOG_FILE: OnceLock<Arc<Mutex<File>>> = OnceLock::new();
+static CONSOLE_LOG_ENABLED: OnceLock<bool> = OnceLock::new();
 
 struct TeeLoggerWriter {
     file: Arc<Mutex<File>>,
+    mirror_to_stderr: bool,
 }
 
 impl Write for TeeLoggerWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.mirror_to_stderr {
+            let _ = io::stderr().write_all(buf);
+        }
         if let Ok(mut f) = self.file.lock() {
             f.write_all(buf)?;
         }
@@ -97,13 +103,30 @@ fn init_session_log_file() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn attach_parent_console_if_available() -> bool {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+
+    // GUI 서브시스템으로 실행되더라도 부모 터미널이 있으면 붙어서 로그를 보여준다.
+    unsafe { AttachConsole(ATTACH_PARENT_PROCESS) != 0 }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn attach_parent_console_if_available() -> bool {
+    false
+}
+
 pub fn main() -> iced::Result {
+    let _ = CONSOLE_LOG_ENABLED.set(attach_parent_console_if_available());
     let _ = init_session_log_file();
 
     let mut logger = env_logger::Builder::from_env(Env::default().default_filter_or("info"));
     logger.format_timestamp_millis();
     if let Some(file) = SESSION_LOG_FILE.get().cloned() {
-        logger.target(env_logger::Target::Pipe(Box::new(TeeLoggerWriter { file })));
+        logger.target(env_logger::Target::Pipe(Box::new(TeeLoggerWriter {
+            file,
+            mirror_to_stderr: *CONSOLE_LOG_ENABLED.get().unwrap_or(&false),
+        })));
     }
     let _ = logger.try_init();
 
