@@ -23,14 +23,14 @@ use ironrdp::pdu::rdp::capability_sets::{
     RemoteFxContainer, RfxCaps, RfxCapset, RfxClientCapsContainer, RfxICap, RfxICapFlags,
 };
 use ironrdp::pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
-use ironrdp::pdu::rdp::headers::ShareDataPdu;
-use ironrdp::pdu::rdp::vc::dvc::gfx::{
+use ironrdp::pdu::rdp::headers::{decode_io_channel, IoChannelPdu, ShareDataPdu};
+use ironrdp_egfx::pdu::{
     CapabilitiesAdvertisePdu, CapabilitiesV10Flags, CapabilitiesV103Flags, CapabilitiesV104Flags,
-    CapabilitiesV107Flags, CapabilitiesV8Flags, CapabilitiesV81Flags, CapabilitySet, ClientPdu,
-    Codec1Type, FrameAcknowledgePdu, PixelFormat as GfxPixelFormat, QueueDepth, ServerPdu,
+    CapabilitiesV107Flags, CapabilitiesV8Flags, CapabilitiesV81Flags, CapabilitySet, GfxPdu,
+    Codec1Type, FrameAcknowledgePdu, PixelFormat as GfxPixelFormat, QueueDepth,
 };
 use ironrdp::session::image::DecodedImage;
-use ironrdp::session::{ActiveStage, ActiveStageOutput};
+use ironrdp::session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput};
 
 use ironrdp_cliprdr::backend::{ClipboardMessage, CliprdrBackendFactory};
 use ironrdp_cliprdr::{Cliprdr, CliprdrClient};
@@ -183,7 +183,17 @@ async fn run_rdp_worker_inner(
     let height = connection_result.desktop_size.height;
 
     let mut image = DecodedImage::new(PixelFormat::RgbA32, width, height);
-    let mut active_stage = ActiveStage::new(connection_result);
+    let activation_factory = connection_result.activation_factory;
+    let mut active_stage = ActiveStageBuilder {
+        static_channels: connection_result.static_channels,
+        user_channel_id: connection_result.user_channel_id,
+        io_channel_id: connection_result.io_channel_id,
+        message_channel_id: connection_result.message_channel_id,
+        share_id: connection_result.share_id,
+        compression_type: connection_result.compression_type,
+        enable_server_pointer: connection_result.enable_server_pointer,
+        pointer_software_rendering: connection_result.pointer_software_rendering,
+    }.build();
 
     // Emit Connected only AFTER handshake succeeds
     let _ = tx_from_worker.send(ConnectionEvent::Connected(tx_to_rdp));
@@ -287,18 +297,33 @@ async fn run_rdp_worker_inner(
                     // and dispatch the OS clipboard event to the appropriate Cliprdr method.
                     let svc_result = match msg {
                         ClipboardMessage::SendInitiateCopy(formats) => {
-                            if let Some(cliprdr) = active_stage.get_svc_processor::<CliprdrClient>() {
+                            if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() {
                                 cliprdr.initiate_copy(&formats).ok()
                             } else { None }
                         }
                         ClipboardMessage::SendFormatData(response) => {
-                            if let Some(cliprdr) = active_stage.get_svc_processor::<CliprdrClient>() {
+                            if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() {
                                 cliprdr.submit_format_data(response).ok()
                             } else { None }
                         }
                         ClipboardMessage::SendInitiatePaste(format_id) => {
-                            if let Some(cliprdr) = active_stage.get_svc_processor::<CliprdrClient>() {
+                            if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() {
                                 cliprdr.initiate_paste(format_id).ok()
+                            } else { None }
+                        }
+                        ClipboardMessage::SendFileContentsRequest(request) => {
+                            if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() {
+                                cliprdr.request_file_contents(request).ok()
+                            } else { None }
+                        }
+                        ClipboardMessage::SendFileContentsResponse(response) => {
+                            if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() {
+                                cliprdr.submit_file_contents(response).ok()
+                            } else { None }
+                        }
+                        ClipboardMessage::SendInitiateFileCopy(files) => {
+                            if let Some(cliprdr) = active_stage.get_svc_processor_mut::<CliprdrClient>() {
+                                cliprdr.initiate_file_copy(files).ok()
                             } else { None }
                         }
                         ClipboardMessage::Error(e) => {
@@ -460,16 +485,44 @@ async fn run_rdp_worker_inner(
                             let _ = tx_from_worker.send(ConnectionEvent::Disconnected);
                             return Ok(());
                         }
-                        ActiveStageOutput::DeactivateAll(mut cas) => {
+                        ActiveStageOutput::DeactivateAll => {
+                            let mut cas = activation_factory.create();
                             let mut buf = WriteBuf::new();
                             loop {
-                                if matches!(
-                                    cas.connection_activation_state(),
-                                    ConnectionActivationState::Finalized { .. }
-                                ) {
+                                if let ConnectionActivationState::Finalized {
+                                    desktop_size,
+                                    share_id,
+                                    enable_server_pointer,
+                                    pointer_software_rendering,
+                                } = cas.connection_activation_state() {
+                                    active_stage.set_share_id(share_id);
+                                    active_stage.set_enable_server_pointer(enable_server_pointer);
+                                    active_stage.set_fastpath_processor(
+                                        ironrdp::session::fast_path::ProcessorBuilder {
+                                            io_channel_id: activation_factory.io_channel_id(),
+                                            user_channel_id: activation_factory.user_channel_id(),
+                                            share_id,
+                                            enable_server_pointer,
+                                            pointer_software_rendering,
+                                            bulk_decompressor: None,
+                                        }.build(),
+                                    );
+                                    image = DecodedImage::new(
+                                        PixelFormat::RgbA32, desktop_size.width, desktop_size.height,
+                                    );
+                                    pending_rect = None;
+                                    let update = FrameUpdate::Full {
+                                        width: desktop_size.width,
+                                        height: desktop_size.height,
+                                        rgba: image.data().to_vec(),
+                                    };
+                                    ui_frame_batches += 1;
+                                    ui_frame_updates += 1;
+                                    ui_frame_bytes += frame_update_byte_len(&update);
+                                    let _ = tx_from_worker.send(ConnectionEvent::Frames(vec![update]));
                                     break;
                                 }
-                                single_sequence_step(&mut framed, &mut *cas, &mut buf)
+                                single_sequence_step(&mut framed, &mut cas, &mut buf)
                                     .await
                                     .map_err(|e| format!("reactivation step failed: {:?}", e))?;
                             }
@@ -702,14 +755,14 @@ fn log_x224_pdu(log: &mut std::fs::File, pdu_n: usize, frame: &[u8]) {
         .unwrap_or(0);
 
     // Try to decode as MCS SendDataIndication
-    let Ok(data_ctx) = connector::legacy::decode_send_data_indication(frame) else {
+    let Ok(data_ctx) = ironrdp::pdu::mcs::decode_send_data_indication(frame) else {
         let _ = writeln!(log, "[{ts}] #{pdu_n} X224 <decode-fail: not SendDataIndication> raw={}", hex_head(frame, 32));
         return;
     };
 
     let channel_id = data_ctx.channel_id;
 
-    let Ok(io_pdu) = connector::legacy::decode_io_channel(data_ctx) else {
+    let Ok(io_pdu) = decode_io_channel(data_ctx) else {
         // Non-IO channel (SVC data: rdpsnd, drdynvc, cliprdr, …)
         // Try to peek the first byte to hint at the PDU type for DRDYNVC.
         let dvc_hint = if frame.len() > 10 {
@@ -723,10 +776,10 @@ fn log_x224_pdu(log: &mut std::fs::File, pdu_n: usize, frame: &[u8]) {
     };
 
     match io_pdu {
-        connector::legacy::IoChannelPdu::DeactivateAll(_) => {
+        IoChannelPdu::DeactivateAll(_) => {
             let _ = writeln!(log, "[{ts}] #{pdu_n} X224 ch={channel_id} ***DeactivateAll***");
         }
-        connector::legacy::IoChannelPdu::Data(ctx) => {
+        IoChannelPdu::Data(ctx) => {
             let name = ctx.pdu.as_short_name();
             let detail = match &ctx.pdu {
                 ShareDataPdu::SetKeyboardIndicators(raw) => {
@@ -737,6 +790,9 @@ fn log_x224_pdu(log: &mut std::fs::File, pdu_n: usize, frame: &[u8]) {
                 other => other.as_short_name().to_string(),
             };
             let _ = writeln!(log, "[{ts}] #{pdu_n} X224 ch={channel_id} {name} {detail}");
+        }
+        IoChannelPdu::MultitransportRequest(_) => {
+            let _ = writeln!(log, "[{ts}] #{pdu_n} X224 ch={channel_id} MultitransportRequest");
         }
     }
 }
@@ -768,14 +824,14 @@ fn try_handle_slowpath_bitmap(frame: &[u8]) -> Vec<FrameUpdate> {
     let mut updates = Vec::new();
 
     // Decode X224 → MCS SendDataIndication → ShareControl → ShareData
-    let Ok(data_ctx) = connector::legacy::decode_send_data_indication(frame) else {
+    let Ok(data_ctx) = ironrdp::pdu::mcs::decode_send_data_indication(frame) else {
         return updates;
     };
-    let Ok(io_channel) = connector::legacy::decode_io_channel(data_ctx) else {
+    let Ok(io_channel) = decode_io_channel(data_ctx) else {
         return updates;
     };
 
-    let connector::legacy::IoChannelPdu::Data(ctx) = io_channel else {
+    let IoChannelPdu::Data(ctx) = io_channel else {
         return updates;
     };
 
@@ -1033,8 +1089,8 @@ type UpgradedFramed = Framed<MovableTokioStream<ironrdp_tls::TlsStream<tokio::ne
 
 // ── Phase 9-B-1: GFX DVC processor ──────────────────────────────────────────
 
-/// Newtype wrapper so ClientPdu can be sent as a DvcMessage.
-struct GfxClientMsg(ClientPdu);
+/// Newtype wrapper so GfxPdu can be sent as a DvcMessage.
+struct GfxClientMsg(GfxPdu);
 
 impl IronEncode for GfxClientMsg {
     fn encode(&self, dst: &mut WriteCursor<'_>) -> EncodeResult<()> {
@@ -1080,7 +1136,7 @@ impl DvcProcessor for GfxProcessor {
 
     fn start(&mut self, _channel_id: u32) -> dvc_pdu::PduResult<Vec<DvcMessage>> {
         info!("[GFX] channel opened, advertising capabilities V8..V10_7");
-        let caps = ClientPdu::CapabilitiesAdvertise(CapabilitiesAdvertisePdu(vec![
+        let caps = GfxPdu::CapabilitiesAdvertise(CapabilitiesAdvertisePdu::from_typed(&[
             CapabilitySet::V8    { flags: CapabilitiesV8Flags::empty() },
             CapabilitySet::V8_1  { flags: CapabilitiesV81Flags::empty() },
             CapabilitySet::V10   { flags: CapabilitiesV10Flags::AVC_DISABLED },
@@ -1102,7 +1158,7 @@ impl DvcProcessor for GfxProcessor {
             return Ok(vec![]);
         }
 
-        let pdu = match ironrdp_core::decode::<ServerPdu>(&decompressed) {
+        let pdu = match ironrdp_core::decode::<GfxPdu>(&decompressed) {
             Ok(p) => p,
             Err(e) => {
                 warn!("[GFX] ServerPdu decode error: {:?}", e);
@@ -1113,39 +1169,39 @@ impl DvcProcessor for GfxProcessor {
         let mut responses: Vec<DvcMessage> = Vec::new();
 
         match pdu {
-            ServerPdu::CapabilitiesConfirm(confirm) => {
+            GfxPdu::CapabilitiesConfirm(confirm) => {
                 info!("[GFX] capabilities confirmed: {:?}", confirm);
             }
-            ServerPdu::CreateSurface(create) => {
+            GfxPdu::CreateSurface(create) => {
                 self.surfaces.insert(create.surface_id, GfxSurface {
                     output_origin_x: 0,
                     output_origin_y: 0,
                 });
             }
-            ServerPdu::DeleteSurface(del) => {
+            GfxPdu::DeleteSurface(del) => {
                 self.surfaces.remove(&del.surface_id);
             }
-            ServerPdu::MapSurfaceToOutput(map) => {
+            GfxPdu::MapSurfaceToOutput(map) => {
                 if let Some(s) = self.surfaces.get_mut(&map.surface_id) {
                     s.output_origin_x = map.output_origin_x;
                     s.output_origin_y = map.output_origin_y;
                 }
             }
-            ServerPdu::ResetGraphics(reset) => {
+            GfxPdu::ResetGraphics(reset) => {
                 self.surfaces.clear();
                 info!("[GFX] ResetGraphics: {}x{}", reset.width, reset.height);
             }
-            ServerPdu::StartFrame(_) => {}
-            ServerPdu::EndFrame(end) => {
+            GfxPdu::StartFrame(_) => {}
+            GfxPdu::EndFrame(end) => {
                 self.frames_decoded += 1;
-                let ack = ClientPdu::FrameAcknowledge(FrameAcknowledgePdu {
+                let ack = GfxPdu::FrameAcknowledge(FrameAcknowledgePdu {
                     queue_depth: QueueDepth::Unavailable,
                     frame_id: end.frame_id,
                     total_frames_decoded: self.frames_decoded,
                 });
                 responses.push(Box::new(GfxClientMsg(ack)));
             }
-            ServerPdu::WireToSurface1(w2s) => {
+            GfxPdu::WireToSurface1(w2s) => {
                 match w2s.codec_id {
                     Codec1Type::Uncompressed => {
                         let surface = match self.surfaces.get(&w2s.surface_id) {
@@ -1172,7 +1228,7 @@ impl DvcProcessor for GfxProcessor {
                     }
                 }
             }
-            ServerPdu::WireToSurface2(w2s2) => {
+            GfxPdu::WireToSurface2(w2s2) => {
                 warn!("[GFX] WireToSurface2: unsupported codec {:?} - Phase 9-B-2/C", w2s2.codec_id);
             }
             _ => {}
@@ -1316,6 +1372,8 @@ fn build_config(username: String, password: String, domain: Option<String>, widt
         client_build: 0,
         client_name: "kterm-rdp".to_owned(),
         client_dir: "C:\\Windows\\System32\\mstscax.dll".to_owned(),
+        alternate_shell: String::new(),
+        work_dir: String::new(),
         #[cfg(windows)]
         platform: MajorPlatformType::WINDOWS,
         #[cfg(target_os = "macos")]
@@ -1344,5 +1402,48 @@ fn build_config(username: String, password: String, domain: Option<String>, widt
         hardware_id: None,
         license_cache: None,
         timezone_info: TimezoneInfo::default(),
+        compression_type: None,
+        multitransport_flags: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gfx_capability_advertisement_preserves_wire_versions() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut processor = GfxProcessor::new(tx);
+        let messages = processor.start(1).unwrap();
+        assert_eq!(messages.len(), 1);
+
+        let encoded = ironrdp_core::encode_vec(messages[0].as_ref()).unwrap();
+        assert_eq!(&encoded[..4], &[0x12, 0x00, 0x00, 0x00]);
+        let GfxPdu::CapabilitiesAdvertise(caps) = ironrdp_core::decode(&encoded).unwrap() else {
+            panic!("expected capabilities advertisement");
+        };
+        assert_eq!(caps.0.len(), 10);
+        assert_eq!(caps.0[0].parsed().unwrap(), Some(CapabilitySet::V8 {
+            flags: CapabilitiesV8Flags::empty(),
+        }));
+        assert_eq!(caps.0[9].parsed().unwrap(), Some(CapabilitySet::V10_7 {
+            flags: CapabilitiesV107Flags::AVC_DISABLED,
+        }));
+    }
+
+    #[test]
+    fn gfx_frame_acknowledgement_matches_wire_fixture() {
+        let message = GfxClientMsg(GfxPdu::FrameAcknowledge(FrameAcknowledgePdu {
+            queue_depth: QueueDepth::Unavailable,
+            frame_id: 0x12345678,
+            total_frames_decoded: 2,
+        }));
+        let encoded = ironrdp_core::encode_vec(&message).unwrap();
+        assert_eq!(encoded, [
+            0x0d, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12,
+            0x02, 0x00, 0x00, 0x00,
+        ]);
     }
 }

@@ -1,40 +1,42 @@
 [package]
 name = "kterm"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-bytes = "1.8.0"
-chrono = { version = "0.4.42", features = ["clock"] }
-env_logger = "0.11.9"
+bytes = "1.12.1"
+chrono = { version = "0.4.45", features = ["clock"] }
+env_logger = "0.11.11"
 iced = { version = "0.14.0", features = ["canvas", "image", "tokio", "advanced", "wgpu"] }
-log = "0.4.29"
+log = "0.4.34"
 nectar = "0.4.0"
-russh = { version = "0.55.0", features = ["async-trait"] }
-tokio-util = { version = "0.7.13", features = ["codec"] }
-russh-keys = "0.49.2"
-tokio-serial = "5.4.4"
-tokio = { version = "1.50.0", features = ["full"] }
+# Newer russh releases conflict with IronRDP's pinned crypto dependencies.
+russh = { version = "=0.55.0", features = ["async-trait"] }
+tokio-util = { version = "0.7.19", features = ["codec"] }
+tokio-serial = "5.5.0"
+tokio = { version = "1.53.2", features = ["full"] }
 unicode-width = "0.2.2"
 vte = "0.15.0"
-async-trait = "0.1.86"
-futures = "0.3.31"
+futures = "0.3.34"
 portable-pty = "0.9.0"
-ironrdp = { version = "0.14.0", features = ["connector", "session", "graphics", "pdu", "cliprdr"] }
-ironrdp-input = "0.5.0"
-ironrdp-tokio = { version = "0.8.0", features = ["reqwest"] }
-ironrdp-core = "0.1.5"
-ironrdp-tls = { version = "0.2.0", features = ["rustls"] }
-bytemuck = { version = "1.25", features = ["derive"] }
-ironrdp-rdpsnd = "0.7.0"
-ironrdp-rdpsnd-native = "0.5.0"
-ironrdp-dvc = "0.5.0"
-ironrdp-cliprdr = "0.5.0"
-ironrdp-cliprdr-native = "0.5.0"
-vnc-rs = "0.5.3"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+ironrdp = { version = "0.17.0", features = ["connector", "session", "graphics", "pdu", "cliprdr"] }
+ironrdp-input = "0.7.0"
+ironrdp-tokio = { version = "0.10.0", features = ["reqwest"] }
+ironrdp-core = "0.2.1"
+ironrdp-tls = { version = "0.2.2", features = ["rustls"] }
+bytemuck = { version = "1.25.2", features = ["derive"] }
+ironrdp-rdpsnd = "0.9.0"
+ironrdp-rdpsnd-native = "0.7.0"
+ironrdp-dvc = "0.8.0"
+ironrdp-egfx = "0.3.0"
+# sspi 0.21.3 does not handle the error variant added in picky-krb 0.12.5.
+picky-krb = "=0.12.4"
+ironrdp-cliprdr = "0.7.0"
+ironrdp-cliprdr-native = "0.7.0"
+vnc-rs = "0.6.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console"] }
