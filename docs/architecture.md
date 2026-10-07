@@ -61,6 +61,8 @@ flowchart LR
 
 `vte`는 parser이며 terminal mode·grid semantics는 직접 구현합니다. 셀은 문자 하나와 색상·속성을 보관하고 wide character 뒤에는 NUL continuation cell을 사용합니다. history 상한은 10,000줄이며 폰트·셀 크기는 고정입니다.
 
+K02에서 cursor를 화면 범위 안에 유지하고 행 끝 다음 출력의 줄바꿈은 `wrap_pending`으로 분리했습니다. ECH/EL은 공통 `erase_cells`를 사용하며 한글의 한쪽 셀을 지우면 glyph 전체를 지웁니다. resize는 continuation cell을 한 번만 소비하고 cursor 위치도 새 행·열에 맞춥니다. 0 크기는 최소 1행·1열로 보정하고 1열에서 표현할 수 없는 wide glyph는 replacement character로 표시합니다.
+
 ### 원격 화면·입력 경로
 
 RDP/VNC의 `FrameUpdate`를 `RemoteDisplayState::apply_batch`에 반영합니다. RGBA는 `Arc<Vec<u8>>` 기반이며 `source_id`는 세션 간 texture 혼합을 방지하고 `frame_seq`는 중복 업로드를 줄입니다. 첫 rect-only 배치와 큰 rect 배치는 full upload로 승격합니다.
@@ -114,16 +116,16 @@ Renderer는 full 또는 dirty rectangle을 texture에 업로드하고 WGSL에서
 |---|---|---|
 | SEC-01 | `ssh.rs:18`의 check_server_key가 공개키를 사용하지 않고 Ok(true)를 반환합니다. | known_hosts·최초 신뢰·변경 키 차단이 필요합니다. 실제 공격은 재현하지 않았습니다. |
 | SEC-02 | `rdp.rs`의 connect가 사용하는 ironrdp-tls 0.2.2 rustls backend가 인증서·TLS signature 성공 assertion을 반환합니다. | NLA와 TLS 신뢰는 별개입니다. 정상 검증·사설 CA·pinning이 필요합니다. |
-| SEC-03 | `vnc.rs:752`의 Text 내용이 Data → update info 로그 → 파일로 전달됩니다. | clipboard 비밀값이 로그에 남을 수 있습니다. 길이·방향만 기록해야 합니다. |
-| TERM-01~04 | 아래 독립 실행에서 ECH·panic·alternate screen·한글 reflow 오류가 재현되었습니다. | 공통 terminal backend에 영향을 줄 수 있습니다. GUI 종료 자체는 재현하지 않았습니다. |
+| SEC-03 | 수정 전 VNC Text 본문이 Data → update info 로그 → 파일로 전달되었습니다. K02에서 해당 경로를 제거하고 byte 길이만 debug 로그에 남깁니다. | 본문·개행을 포함한 clipboard 입력의 진단 로그 제외 회귀가 통과했습니다. OS clipboard 연동은 아직 없습니다. |
+| TERM-01~04 | 아래 최초 분석에서 4건을 재현했습니다. K02 후 TERM-01·02·04 자동 회귀는 통과했고 TERM-03은 ignored로 남아 있습니다. | 공통 terminal의 해당 재현은 수정했으나 전체 TUI·ConPTY 호환성을 보장하지 않습니다. |
 | LIFE-01 | `rdp.rs`의 handle_rdp_input에서 Shutdown은 Ok(())만 반환하고 worker 루프를 종료하지 않습니다. | 종료가 지연될 수 있습니다. 실제 누수는 미측정입니다. |
 | LIFE-02 | 연결 전 sender가 없고 VNC handshake·retry sleep은 취소·전체 timeout이 부족합니다. | 연결 중 탭 닫기·인증 대기에서 취소가 지연될 수 있습니다. |
 | LIFE-03 | Telnet·Serial 오류 후 초기 상태로 돌아갑니다. SSH EOF는 상태를 바꾸지 않고 PTY kill/wait는 명시적으로 관리하지 않습니다. | 재시도·상태 불일치·프로세스 종료 문제의 빈도와 누수는 미측정입니다. |
 | RDP-01 | encode_resize 호출은 있으나 DisplayControlClient 등록이 없습니다. | ironrdp-session 0.11.0은 채널이 없으면 None을 반환합니다. 동적 resize가 미완입니다. |
 | RDP-02 | GFX capability 광고보다 codec·명령 처리가 좁습니다. | 서버별 화면 누락 가능성을 검증하고 협상·fallback을 보완해야 합니다. |
-| VNC-01 | Tight 협상 후 `vnc.rs:804`의 JpegImage를 무시합니다. | JPEG 영역 갱신이 누락될 수 있습니다. 모든 Tight 접속 실패를 뜻하지는 않습니다. |
+| VNC-01 | Tight 협상 후 `vnc.rs`의 JpegImage를 무시합니다. | JPEG 영역 갱신이 누락될 수 있습니다. 모든 Tight 접속 실패를 뜻하지는 않습니다. |
 | CFG-01 | 일부 저장 설정을 연결·layout에서 읽지 않습니다. | UI와 실제 동작이 다릅니다. |
-| PERF-01 | unbounded 채널·frame clone·CSI별 파일 쓰기·설정 동기 write가 있습니다. | 대량 출력·고해상도에서 메모리·입력 지연 증가 가능성이 있습니다. 성능은 미측정입니다. |
+| PERF-01 | unbounded 채널·frame clone·설정 동기 write가 있습니다. CSI별 파일 쓰기는 K02에서 제거했습니다. | 대량 출력·고해상도에서 메모리·입력 지연 증가 가능성이 있습니다. 성능은 미측정입니다. |
 | INPUT-01 | mouse 고정 offset, 원격 keyboard·CursorMoved의 viewport 제한 부재입니다. | 분할·sidebar·focus 변경에서 좌표·라우팅 오류가 예상됩니다. |
 
 ### terminal 재현 결과
@@ -137,9 +139,9 @@ Renderer는 full 또는 dirty rectangle을 texture에 업로드하고 WGSL에서
 | TERM-03 | 1행 8열, `BASE\x1b[?1049h\rALT\x1b[?1049l` | `BASE    ` | `ALTE    ` |
 | TERM-04 | 1행 6열 `가A` 출력 후 8열 resize | `가_A     ` | 변경 전 `가_A   `, 변경 후 `가 _A    ` |
 
-ECH가 DCH처럼 뒤 셀을 당기며 행을 채운 cursor는 cols에 도달합니다. private mode 처리가 없고 reflow는 continuation cell을 중복 계산합니다. [XTerm Control Sequences](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html)를 동작 기준으로 사용했습니다.
+위 표는 수정 전 관측입니다. 당시 ECH는 DCH처럼 뒤 셀을 당기고 행을 채운 cursor는 cols에 도달했으며 reflow는 continuation cell을 중복 계산했습니다. K02에서 이 세 경로를 수정했습니다. private mode는 아직 미구현입니다. ECH/EL과 cursor 동작은 [XTerm Control Sequences](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html)를 기준으로 확인했습니다.
 
-ConPTY 보정은 CUP/ECH의 일반 의미를 바꾸며 모든 terminal backend에 적용됩니다. 기존 “한글·잔상 완전 해결” 기록은 현재 보장할 수 없습니다. save/restore·DEC mode·application cursor/keypad·bracketed paste·mouse reporting·OSC·grapheme는 추가 검증 대상입니다.
+ConPTY의 기존 CUP/ECH 보정은 K02에서 Windows Local 세션에만 적용하도록 제한했습니다. SSH/Telnet/Serial의 새 terminal에서는 보정이 기본 비활성입니다. Local의 보정 자체와 기존 “한글·잔상 완전 해결” 기록은 실기 검증 없이 보장할 수 없습니다. save/restore·DEC mode·application cursor/keypad·bracketed paste·mouse reporting·OSC·grapheme는 추가 검증 대상입니다. [첫 구현 결과](development-plan.md#k01k02-첫-구현-기록)에 현재 자동 검증 범위를 기록했습니다.
 
 ### 유지할 설계와 과거 수정
 

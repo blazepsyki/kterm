@@ -40,7 +40,7 @@ cargo build --release --locked
 
 | 영역 | 구현된 기본 경로 | 남은 제약 |
 |---|---|---|
-| terminal | ANSI/CSI 일부, 색상, 최대 10,000줄 history, 선택·복사·붙여넣기, IME입니다. | ECH·행 끝 panic·alternate screen·한글 reflow 문제가 확인되었습니다. |
+| terminal | ANSI/CSI 일부, 색상, 최대 10,000줄 history, 선택·복사·붙여넣기, IME입니다. | ECH·행 끝 panic·기본 한글 reflow 회귀는 수정했습니다. alternate screen·grapheme·실제 TUI/ConPTY 검증은 남아 있습니다. |
 | SSH | 비밀번호 인증, PTY, keepalive, 창 크기 전달입니다. | 서버 키를 무조건 수락하며 개인키·agent·MFA·SFTP·터널이 없습니다. |
 | Telnet | 바이트 송수신, codec, NAWS 전송입니다. | 협상 처리가 제한적이며 line ending·local echo 설정이 적용되지 않습니다. 평문 통신입니다. |
 | Serial | 비동기 송수신과 data bits·stop bits·parity·hardware flow control입니다. | 실물 검증과 장치 탐색·break·신호 제어가 필요합니다. |
@@ -50,6 +50,17 @@ cargo build --release --locked
 | UI·설정 | 탭 생성·선택·닫기, 프로토콜 선택, JSON 저장·로드입니다. | 저장 연결 프로필·분할이 없고 일부 설정과 View/Help 메뉴는 실제 기능이 없습니다. |
 
 확인 근거와 재현 결과는 [구조와 구현 현황](docs/architecture.md#확인된-문제)에 정리했습니다. 추가 기능과 순서는 [개발·검증 계획](docs/development-plan.md#개발-우선순위)에서 확인하시면 됩니다.
+
+## 개발 순서
+
+MobaXterm의 공개 공통 기능과 Professional의 프로그램 기능을 최종 대체 범위로 두고, 다음 순서로 진행하는 계획입니다. 아래 항목은 구현 완료를 의미하지 않습니다.
+
+1. **P0 — 기존 기능 수정:** terminal 회귀·PR CI부터 시작해 panic/ECH/reflow·로그 노출, SSH/RDP 신뢰 검증, 연결 취소·종료, terminal mode, 원격 화면·입력, 설정 적용·저장을 보완합니다.
+2. **P1 — 서버 관리:** 저장 profile → SSH key/agent/MFA → 자격 증명 보관·세션 이전 → SFTP → gateway·터널을 추가합니다. 검색·출력 저장과 RDP/VNC·Telnet/Serial/Local의 기본 작업도 완성합니다.
+3. **P2 — 통합 환경:** 분할·원격 편집, X11·Unix 도구, 자동화·추가 프로토콜·RDP 확장을 구현합니다. X server와 Unix runtime의 배포 가능성 조사는 P1부터 시작합니다.
+4. **P3 — 남은 동등성:** 기업 배포·사용자화, 내장 서버·도구·plugin을 완성합니다. 후순위 기능도 최종 대체 범위에 포함합니다.
+
+작업별 위치·선행 조건·완료 조건은 [K01~K29 우선순위 표](docs/development-plan.md#개발-우선순위), 첫 수정 범위는 [바로 착수할 수정 범위](docs/development-plan.md#바로-착수할-수정-범위)에 있습니다. X11·Unix 환경과 후속 기능을 검증하기 전까지는 전체 기능 동등성이 완료된 것으로 판단하지 않습니다.
 
 ## 설정과 로그
 
@@ -63,7 +74,7 @@ $env:KTERM_RDP_TRACE = '1'
 cargo run --locked
 ```
 
-현재 VNC clipboard 내용이 진단 로그에 전달되는 경로와 terminal CSI별 debug 파일 쓰기가 남아 있습니다. [우선 수정 항목](docs/architecture.md#확인된-문제)에 포함되어 있습니다.
+VNC clipboard 본문을 진단 로그로 전달하던 경로와 terminal CSI별 debug 파일 쓰기를 제거했습니다. VNC는 clipboard 수신 byte 길이만 debug 로그에 기록하며 OS clipboard 연동은 후속 작업입니다.
 
 ## 개발과 검증
 
@@ -71,7 +82,7 @@ cargo run --locked
 cargo test --locked
 ```
 
-2026-10-06 의존성 업그레이드 후 테스트 8개가 통과했습니다. 설정 저장 4건·State 2건·GFX wire 호환성 2건이며 실서버 품질을 보장하지는 않습니다. 최신 버전 적용 예외와 API 수정은 [업그레이드 기록](docs/development-plan.md#의존성-업그레이드-기록), 전체 검증·배포 절차는 [개발·검증 계획](docs/development-plan.md)에 있습니다.
+2026-10-06 K01·K02 수정 후 테스트는 **21 passed·0 failed·1 ignored**입니다. 기존 8건에 terminal 회귀 12건과 VNC clipboard 로그 검증 1건을 추가했습니다. ignored 1건은 K05에서 구현할 alternate screen입니다. Windows PR CI에 check/test·선별 Clippy를 추가했으며 GitHub에서의 실행과 실서버·GUI 검증은 아직 확인하지 않았습니다. [첫 구현 기록](docs/development-plan.md#k01k02-첫-구현-기록), [업그레이드 기록](docs/development-plan.md#의존성-업그레이드-기록)과 [전체 검증 계획](docs/development-plan.md#검증-계획)에서 범위를 확인하시면 됩니다.
 
 ## 라이선스
 

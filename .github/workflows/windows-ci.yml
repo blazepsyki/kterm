@@ -1,0 +1,33 @@
+name: Windows CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  check-and-test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Check all targets
+        run: cargo check --locked --all-targets
+
+      - name: Check correctness and unused bindings
+        run: cargo clippy --locked --all-targets -- -D clippy::correctness -D unused_imports -D unused_variables
+
+      - name: Run regression tests
+        run: cargo test --locked

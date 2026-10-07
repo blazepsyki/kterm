@@ -76,6 +76,8 @@ pub struct TerminalEmulator {
     pub grid: std::collections::VecDeque<Line>,    // 현재 화면에 보이는 라인들
     pub cursor_x: usize,
     pub cursor_y: usize,
+    wrap_pending: bool,
+    pub conpty_workarounds: bool,
     pub current_fg: Color,
     pub current_bg: Color,
     pub current_bold: bool,
@@ -100,6 +102,8 @@ impl Default for TerminalEmulator {
 
 impl TerminalEmulator {
     pub fn new(rows: usize, cols: usize) -> Self {
+        let rows = rows.max(1);
+        let cols = cols.max(1);
         let mut grid = std::collections::VecDeque::with_capacity(rows);
         for _ in 0..rows {
             grid.push_back(Line::new(cols));
@@ -110,6 +114,8 @@ impl TerminalEmulator {
             history: std::collections::VecDeque::with_capacity(1000), // 가단위 1000줄
             grid,
             cursor_x: 0, cursor_y: 0,
+            wrap_pending: false,
+            conpty_workarounds: false,
             current_fg: Color::WHITE,
             current_bg: Color::BLACK,
             current_bold: false,
@@ -220,7 +226,7 @@ impl TerminalEmulator {
         }
     }
 
-    fn clear_line(&mut self, row: usize, mode: usize) {
+    fn erase_cells(&mut self, row: usize, start: usize, end: usize) {
         let blank = Cell { 
             ch: ' ', 
             fg: self.current_fg, 
@@ -229,29 +235,31 @@ impl TerminalEmulator {
             italic: false,
             underline: false,
         };
-        if row < self.grid.len() {
-            let line = &mut self.grid[row];
-            match mode {
-                0 => { // To end
-                    // --- Wide-aware Cleanup: 만약 시작점이 와이드 캐릭터의 뒷부분(\0)이면 이전 칸도 지움 ---
-                    if self.cursor_x > 0 && line.cells[self.cursor_x].ch == '\0' {
-                        line.cells[self.cursor_x - 1] = blank;
-                    }
-                    for x in self.cursor_x..self.cols { line.cells[x] = blank; }
-                    if self.cursor_x == 0 { line.is_wrapped = false; }
-                }
-                1 => { // To start
-                    // --- Wide-aware Cleanup: 만약 끝점이 와이드 캐릭터의 본체이면 다음 칸(\0)도 지움 ---
-                    for x in 0..=self.cursor_x { if x < self.cols { line.cells[x] = blank; } }
-                    if self.cursor_x + 1 < self.cols && line.cells[self.cursor_x + 1].ch == '\0' {
-                        line.cells[self.cursor_x + 1] = blank;
-                    }
-                }
-                2 => { // All
-                    for x in 0..self.cols { line.cells[x] = blank; }
-                    line.is_wrapped = false;
-                }
-                _ => {}
+        if let Some(line) = self.grid.get_mut(row) {
+            let mut start = start.min(line.cells.len());
+            let mut end = end.min(line.cells.len());
+            if start >= end { return; }
+            // Erasing either half of a wide character clears the entire glyph.
+            if start > 0 && line.cells[start].ch == '\0' {
+                start -= 1;
+            }
+            if end < line.cells.len() && line.cells[end].ch == '\0' {
+                end += 1;
+            }
+            line.cells[start..end].fill(blank);
+        }
+    }
+
+    fn clear_line(&mut self, row: usize, mode: usize) {
+        match mode {
+            0 => self.erase_cells(row, self.cursor_x, self.cols),
+            1 => self.erase_cells(row, 0, self.cursor_x.saturating_add(1)),
+            2 => self.erase_cells(row, 0, self.cols),
+            _ => return,
+        }
+        if mode == 2 || (mode == 0 && self.cursor_x == 0) {
+            if let Some(line) = self.grid.get_mut(row) {
+                line.is_wrapped = false;
             }
         }
     }
@@ -280,34 +288,46 @@ impl TerminalEmulator {
     }
 
     pub fn resize(&mut self, new_rows: usize, new_cols: usize) {
+        let new_rows = new_rows.max(1);
+        let new_cols = new_cols.max(1);
         if self.cols == new_cols && self.rows == new_rows { return; }
 
+        let cursor_row = self.history.len() + self.cursor_y;
+        let cursor_column = self.cursor_x + usize::from(self.wrap_pending);
         let mut all_lines: Vec<Line> = self.history.drain(..).collect();
         all_lines.extend(self.grid.drain(..));
 
-        let mut logical_lines: Vec<Vec<Cell>> = Vec::new();
+        let mut logical_lines: Vec<(Vec<Cell>, Option<usize>)> = Vec::new();
         let mut current_logical: Vec<Cell> = Vec::new();
+        let mut logical_cursor = None;
 
-        for line in all_lines {
+        for (row, line) in all_lines.into_iter().enumerate() {
             if !line.is_wrapped && !current_logical.is_empty() {
-                logical_lines.push(current_logical);
+                logical_lines.push((current_logical, logical_cursor.take()));
                 current_logical = Vec::new();
             }
-            // 공백 트리밍은 생략하거나 주의 필요 (커서 위치 보존 때문)
+            if row == cursor_row {
+                logical_cursor = Some(current_logical.len() + cursor_column);
+            }
             current_logical.extend(line.cells);
         }
         if !current_logical.is_empty() {
-            logical_lines.push(current_logical);
+            logical_lines.push((current_logical, logical_cursor));
         }
 
         let mut new_all_lines = Vec::new();
-        for mut logical in logical_lines {
-            // 오른쪽 끝 공백 제거 (Reflow 최적화)
-            while logical.last().map_or(false, |c| c.ch == ' ') {
+        let mut reflow_cursor = None;
+        for (mut logical, cursor_offset) in logical_lines {
+            let minimum_len = cursor_offset.unwrap_or(0);
+            // Preserve the cursor offset while trimming unused trailing cells.
+            while logical.len() > minimum_len && logical.last().is_some_and(|c| c.ch == ' ') {
                 logical.pop();
             }
             
             if logical.is_empty() {
+                if cursor_offset.is_some() {
+                    reflow_cursor = Some((0, new_all_lines.len(), false));
+                }
                 new_all_lines.push(Line::new(new_cols));
                 continue;
             }
@@ -318,17 +338,49 @@ impl TerminalEmulator {
                 let mut new_line = Line::new(new_cols);
                 let mut added = 0;
                 while added < new_cols && i < logical.len() {
-                    let cell = logical[i];
-                    let w = if cell.ch == '\0' { 1 } else { unicode_width::UnicodeWidthChar::width(cell.ch).unwrap_or(1) };
+                    let mut cell = logical[i];
+                    if cell.ch == '\0' {
+                        i += 1;
+                        continue;
+                    }
+                    let mut w = cell.ch.width().unwrap_or(1).max(1);
+                    let consumed = if w > 1 && logical.get(i + 1).is_some_and(|next| next.ch == '\0') {
+                        2
+                    } else {
+                        1
+                    };
+                    if w > new_cols {
+                        // A one-column terminal cannot represent a wide glyph.
+                        cell.ch = '\u{fffd}';
+                        w = 1;
+                    }
                     
                     if w > 1 && added == new_cols - 1 {
                         // Wide char won't fit at the end of the line
                         break;
                     }
+
+                    if let Some(offset) = cursor_offset.filter(|offset| *offset >= i && *offset < i + consumed) {
+                        reflow_cursor = Some((
+                            (added + offset - i).min(new_cols - 1),
+                            new_all_lines.len(),
+                            false,
+                        ));
+                    }
                     
                     new_line.cells[added] = cell;
+                    if w > 1 {
+                        new_line.cells[added + 1] = Cell { ch: '\0', ..cell };
+                    }
                     added += w;
-                    i += 1;
+                    i += consumed;
+                    if cursor_offset == Some(i) && i == logical.len() {
+                        reflow_cursor = Some((
+                            added.min(new_cols - 1),
+                            new_all_lines.len(),
+                            added == new_cols,
+                        ));
+                    }
                 }
                 new_line.is_wrapped = chunk_count > 0;
                 new_all_lines.push(new_line);
@@ -351,8 +403,15 @@ impl TerminalEmulator {
         }
 
         self.scrolling_region = (0, self.rows - 1);
-        self.cursor_x = std::cmp::min(self.cursor_x, self.cols - 1);
-        self.cursor_y = std::cmp::min(self.cursor_y, self.rows - 1);
+        if let Some((x, row, pending)) = reflow_cursor {
+            self.cursor_x = x;
+            self.cursor_y = row.saturating_sub(self.history.len()).min(self.rows - 1);
+            self.wrap_pending = pending;
+        } else {
+            self.cursor_x = self.cursor_x.min(self.cols - 1);
+            self.cursor_y = self.cursor_y.min(self.rows - 1);
+            self.wrap_pending = false;
+        }
         // display_offset이 히스토리 범위를 초과하지 않도록 클램핑
         self.display_offset = std::cmp::min(self.display_offset, self.history.len());
         self.cache.clear();
@@ -449,10 +508,17 @@ struct TerminalPerformer<'a> { emulator: &'a mut TerminalEmulator }
 impl<'a> Perform for TerminalPerformer<'a> {
     fn print(&mut self, c: char) {
         let emu = &mut self.emulator;
-        let w = c.width().unwrap_or(1);
+        let mut c = c;
+        let mut w = c.width().unwrap_or(1);
+        if w == 0 { return; }
+        if w > emu.cols {
+            c = '\u{fffd}';
+            w = 1;
+        }
 
         // 1. 래핑 처리: 현재 X 위치 + 글자 너비가 가로 길이를 초과하면 다음 줄로
-        if emu.cursor_x + w > emu.cols {
+        if emu.wrap_pending || emu.cursor_x + w > emu.cols {
+            emu.wrap_pending = false;
             emu.cursor_x = 0;
             let (top, bottom) = emu.scrolling_region;
             if emu.cursor_y < bottom {
@@ -471,7 +537,7 @@ impl<'a> Perform for TerminalPerformer<'a> {
         }
 
         if emu.cursor_y < emu.rows && emu.cursor_x < emu.cols {
-            if emu.history_clear_timeout > 0 {
+            if emu.conpty_workarounds && emu.history_clear_timeout > 0 {
                 emu.history_printed_lines.insert(emu.cursor_y);
             }
             
@@ -506,12 +572,17 @@ impl<'a> Perform for TerminalPerformer<'a> {
                     underline: emu.current_underline,
                 };
             }
-            emu.cursor_x += w;
+            let next_x = emu.cursor_x + w;
+            emu.wrap_pending = next_x >= emu.cols;
+            emu.cursor_x = next_x.min(emu.cols - 1);
         }
     }
 
     fn execute(&mut self, byte: u8) {
         let emu = &mut self.emulator;
+        if matches!(byte, b'\n' | b'\r' | b'\x08' | b'\t') {
+            emu.wrap_pending = false;
+        }
         match byte {
             b'\n' => { 
                 let (top, bottom) = emu.scrolling_region;
@@ -546,6 +617,13 @@ impl<'a> Perform for TerminalPerformer<'a> {
         let emu = &mut self.emulator;
         let mut it = params.iter();
         let param1 = it.next().and_then(|p| p.first()).copied().unwrap_or(0) as usize;
+
+        if matches!(
+            action,
+            '@' | 'X' | 'A' | 'B' | 'C' | 'D' | 'H' | 'f' | 'J' | 'K' | 'P' | 'L' | 'M' | 'S' | 'T' | 'r'
+        ) {
+            emu.wrap_pending = false;
+        }
 
         match action {
             '@' => { // ICH (Insert Character)
@@ -588,7 +666,7 @@ impl<'a> Perform for TerminalPerformer<'a> {
                 // 대체된 짧은 명령(또는 새 멀티행 명령어) 뒤에 남은 기나긴 흔적(오버행)을 지우려다
                 // 길이 값(n)을 오산하여 끝쪽 한글 잔상을 남기는 버그이므로, "커서부터 끝까지 완전 소거(EL 0)"로 격상시킵니다!
                 // 반면 새 텍스트가 전혀 인쇄되지 않은 하단 행은 순수히 과거 명령어 잔상(`Ghost`)이므로 절대 소거(EL 2)합니다.
-                if let Some(prompt_y) = emu.history_prompt_y {
+                if let Some(prompt_y) = emu.history_prompt_y.filter(|_| emu.conpty_workarounds) {
                     if y >= prompt_y {
                         if emu.history_printed_lines.contains(&y) {
                             emu.clear_line(y, 0); // 0: 새 텍스트가 있는 행은 오버행(끝부분)만 완벽히 소거
@@ -600,29 +678,7 @@ impl<'a> Perform for TerminalPerformer<'a> {
                     }
                 }
 
-                if y < emu.grid.len() {
-                    let blank = Cell { ch: ' ', fg: emu.current_fg, bg: emu.current_bg, bold: false, italic: false, underline: false };
-                    let line = &mut emu.grid[y];
-
-                    // --- Wide-aware Cleanup before shifting ---
-                    if x > 0 && line.cells[x].ch == '\0' {
-                        line.cells[x-1].ch = ' ';
-                    }
-
-                    for i in x..emu.cols {
-                        if i + n < emu.cols {
-                            line.cells[i] = line.cells[i + n];
-                        } else {
-                            line.cells[i] = blank;
-                        }
-                    }
-
-                    // --- Wide-aware Cleanup after shifting: 
-                    // 만약 현재 위치(x)에 \0가 왔다면, 이전 글자가 사라졌으므로 공백으로 바꿈 ---
-                    if x < emu.cols && line.cells[x].ch == '\0' {
-                        line.cells[x].ch = ' ';
-                    }
-                }
+                emu.erase_cells(y, x, x.saturating_add(n));
             }
             'A' => emu.cursor_y = emu.cursor_y.saturating_sub(std::cmp::max(1, param1)),
             'B' => emu.cursor_y = std::cmp::min(emu.rows - 1, emu.cursor_y + std::cmp::max(1, param1)),
@@ -632,7 +688,7 @@ impl<'a> Perform for TerminalPerformer<'a> {
                 // ConPTY 다중 행 반쪽 지우기 에러 보정 로직 (스마트 휴리스틱)
                 // 만약 직전에 빈 공간만을 지우려는 무의미한 명령(X n)이 들어온 직후, 
                 // 정확히 똑같은 n 값으로 커서를 전진시킨다면 커서 동기화가 풀린 상태에서 뒷공간을 지운 치명적 오류입니다.
-                if let Some(('X', prev_n, target_is_empty)) = emu.last_csi {
+                if let Some(('X', prev_n, target_is_empty)) = emu.last_csi.filter(|_| emu.conpty_workarounds) {
                     if prev_n == n && target_is_empty {
                         // 명백한 ConPTY 삭제 델타 버그임이 확인되었으므로, 터미널이 능동적으로 해당 행 전체를 지워 잔상을 제거합니다.
                         emu.clear_line(emu.cursor_y, 2);
@@ -654,7 +710,7 @@ impl<'a> Perform for TerminalPerformer<'a> {
                 
                 // ConPTY 다중 행 잔상 우회 (1): 위로 점프할 경우, 
                 // 프롬프트 좌표(new_y)를 저장하여 이후 하단에 떨어지는 기형적 삭제 명령을 전면 소거로 승격시킬 준비를 합니다.
-                if new_y < old_y {
+                if emu.conpty_workarounds && new_y < old_y {
                     emu.history_prompt_y = Some(new_y);
                     emu.history_clear_timeout = 30; // 넉넉히 30번의 CSI 명령 동안만 유효
                     emu.history_printed_lines.clear(); // 이전 출력 기록 초기화
@@ -794,16 +850,6 @@ impl<'a> Perform for TerminalPerformer<'a> {
             if emu.history_clear_timeout == 0 {
                 emu.history_prompt_y = None;
             }
-        }
-        
-        // Debug logging to a temp file for tracking exactly what the shell sends
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("kterm_debug_csi_v2.log") {
-            let mut p_str = String::new();
-            for p in params.iter() {
-                p_str.push_str(&format!("{:?};", p));
-            }
-            let _ = writeln!(f, "CSI: action={}, params={} x={} y={} limit_n={}", action, p_str, emu.cursor_x, emu.cursor_y, param1);
         }
     }
 }
@@ -1050,4 +1096,155 @@ impl<'a, Message: Clone> Widget<Message, Theme, Renderer> for TerminalView<'a, M
 
 impl<'a, Message: Clone + 'a> From<TerminalView<'a, Message>> for Element<'a, Message> {
     fn from(w: TerminalView<'a, Message>) -> Self { Element::new(w) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TerminalEmulator;
+
+    fn row_text(terminal: &TerminalEmulator, row: usize) -> String {
+        terminal.grid[row].cells.iter().map(|cell| cell.ch).collect()
+    }
+
+    #[test]
+    fn ech_erases_without_shifting_remaining_cells() {
+        let mut terminal = TerminalEmulator::new(1, 8);
+        terminal.process_bytes(b"ABCDE\r\x1b[2C\x1b[1X");
+        assert_eq!(row_text(&terminal, 0), "AB DE   ");
+        assert_eq!(terminal.cursor_x, 2);
+    }
+
+    #[test]
+    fn erase_line_after_filling_row_stays_in_bounds() {
+        let mut terminal = TerminalEmulator::new(1, 4);
+        terminal.process_bytes(b"ABCD\x1b[K");
+        assert_eq!(row_text(&terminal, 0), "ABC ");
+        assert_eq!(terminal.cursor_x, 3);
+    }
+
+    #[test]
+    #[ignore = "TERM-03: alternate screen support is planned in K05"]
+    fn alternate_screen_restores_primary_screen() {
+        let mut terminal = TerminalEmulator::new(1, 8);
+        terminal.process_bytes(b"BASE\x1b[?1049h\rALT\x1b[?1049l");
+        assert_eq!(row_text(&terminal, 0), "BASE    ");
+    }
+
+    #[test]
+    fn reflow_preserves_wide_character_continuation_cells() {
+        let mut terminal = TerminalEmulator::new(1, 6);
+        terminal.process_bytes("가A".as_bytes());
+        terminal.resize(1, 8);
+        assert_eq!(row_text(&terminal, 0), "가\0A     ");
+        assert_eq!(terminal.cursor_x, 3);
+    }
+
+    #[test]
+    fn full_row_defers_wrap_and_sgr_preserves_pending_wrap() {
+        let mut terminal = TerminalEmulator::new(2, 4);
+        terminal.process_bytes(b"ABCD\x1b[31m");
+        assert_eq!((terminal.cursor_x, terminal.cursor_y), (3, 0));
+        assert_eq!(row_text(&terminal, 1), "    ");
+        terminal.process_bytes(b"E");
+        assert_eq!(row_text(&terminal, 0), "ABCD");
+        assert_eq!(row_text(&terminal, 1), "E   ");
+        assert!(terminal.grid[1].is_wrapped);
+    }
+
+    #[test]
+    fn carriage_return_and_erase_cancel_pending_wrap() {
+        let mut terminal = TerminalEmulator::new(2, 4);
+        terminal.process_bytes(b"ABCD\rZ");
+        assert_eq!(row_text(&terminal, 0), "ZBCD");
+        assert_eq!(terminal.cursor_y, 0);
+
+        terminal.process_bytes(b"\rABCD\x1b[KZ");
+        assert_eq!(row_text(&terminal, 0), "ABCZ");
+        assert_eq!(terminal.cursor_y, 0);
+    }
+
+    #[test]
+    fn editing_commands_at_right_margin_stay_in_bounds() {
+        for command in [
+            b"\x1b[K".as_slice(), b"\x1b[1K", b"\x1b[2K", b"\x1b[X", b"\x1b[@", b"\x1b[P"]
+        {
+            let mut terminal = TerminalEmulator::new(1, 4);
+            terminal.process_bytes(b"ABCD");
+            terminal.process_bytes(command);
+            assert!(terminal.cursor_x < terminal.cols);
+            assert_eq!(terminal.grid[0].cells.len(), terminal.cols);
+        }
+    }
+
+    #[test]
+    fn ech_clears_both_halves_of_wide_characters() {
+        for command in [b"\r\x1b[1X".as_slice(), b"\r\x1b[1C\x1b[1X"] {
+            let mut terminal = TerminalEmulator::new(1, 6);
+            terminal.process_bytes("가AB".as_bytes());
+            terminal.process_bytes(command);
+            assert_eq!(row_text(&terminal, 0), "  AB  ");
+        }
+    }
+
+    #[test]
+    fn ech_default_and_large_count_preserve_cursor_and_line_width() {
+        let mut terminal = TerminalEmulator::new(1, 6);
+        terminal.process_bytes(b"ABCDE\r\x1b[2C\x1b[0X");
+        assert_eq!(row_text(&terminal, 0), "AB DE ");
+        terminal.process_bytes(b"\x1b[65535X");
+        assert_eq!(row_text(&terminal, 0), "AB    ");
+        assert_eq!(terminal.cursor_x, 2);
+    }
+
+    #[test]
+    fn cursor_position_does_not_clear_other_wrapped_rows() {
+        let mut terminal = TerminalEmulator::new(3, 4);
+        terminal.process_bytes(b"ABCDEFGHIJ\x1b[2;1H");
+        assert_eq!(row_text(&terminal, 2), "IJ  ");
+        terminal.process_bytes(b"\x1b[3;2H\x1b[X");
+        assert_eq!(row_text(&terminal, 2), "I   ");
+    }
+
+    #[test]
+    fn reflow_joins_wrapped_wide_text_without_duplicate_cells() {
+        let mut terminal = TerminalEmulator::new(2, 4);
+        terminal.process_bytes("가ABC".as_bytes());
+        terminal.resize(2, 8);
+        assert_eq!(row_text(&terminal, 0), "가\0ABC   ");
+        assert_eq!(row_text(&terminal, 1), "        ");
+        assert_eq!((terminal.cursor_x, terminal.cursor_y), (5, 0));
+        terminal.process_bytes(b"D");
+        assert_eq!(row_text(&terminal, 0), "가\0ABCD  ");
+    }
+
+    #[test]
+    fn reflow_maps_pending_wrap_to_new_margin() {
+        let mut terminal = TerminalEmulator::new(2, 4);
+        terminal.process_bytes(b"ABCD");
+        terminal.resize(2, 8);
+        assert_eq!((terminal.cursor_x, terminal.cursor_y), (4, 0));
+        terminal.process_bytes(b"E");
+        assert_eq!(row_text(&terminal, 0), "ABCDE   ");
+
+        let mut terminal = TerminalEmulator::new(2, 4);
+        terminal.process_bytes(b"ABCD");
+        terminal.resize(2, 2);
+        terminal.process_bytes(b"E");
+        assert_eq!(row_text(&terminal, 0), "CD");
+        assert_eq!(row_text(&terminal, 1), "E ");
+    }
+
+    #[test]
+    fn one_column_resize_and_zero_dimensions_remain_usable() {
+        let mut terminal = TerminalEmulator::new(1, 4);
+        terminal.process_bytes("가".as_bytes());
+        terminal.resize(0, 0);
+        assert_eq!((terminal.rows, terminal.cols), (1, 1));
+        assert_eq!(row_text(&terminal, 0), "\u{fffd}");
+        terminal.process_bytes("가".as_bytes());
+        assert_eq!(row_text(&terminal, 0), "\u{fffd}");
+        let mut empty = TerminalEmulator::new(0, 0);
+        empty.process_bytes(b"AB\x1b[K");
+        assert_eq!((empty.rows, empty.cols), (1, 1));
+    }
 }

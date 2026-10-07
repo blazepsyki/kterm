@@ -393,6 +393,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 target_id = Some(session.id);
                 *session =
                     Session::new_terminal(session.id, name, session.terminal.rows, session.terminal.cols);
+                session.terminal.conpty_workarounds = cfg!(target_os = "windows");
             }
             if let Some(target_id) = target_id {
                 Task::run(

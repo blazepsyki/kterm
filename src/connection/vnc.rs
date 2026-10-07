@@ -493,7 +493,6 @@ async fn run_vnc_worker_inner(
                                 jpeg_event_count += 1;
                             }
                             let effect = handle_vnc_event(
-                                &tx_from_worker,
                                 &mut framebuffer,
                                 &mut cursor,
                                 &pointer,
@@ -674,7 +673,6 @@ struct VncEventEffect {
 }
 
 async fn handle_vnc_event(
-    tx_from_worker: &mpsc::UnboundedSender<ConnectionEvent>,
     framebuffer: &mut VncFramebuffer,
     cursor: &mut VncCursorState,
     _pointer: &PointerState,
@@ -750,9 +748,7 @@ async fn handle_vnc_event(
             return Ok(VncEventEffect::default());
         }
         VncEvent::Text(text) => {
-            let _ = tx_from_worker.send(ConnectionEvent::Data(
-                format!("\r\n[VNC] Clipboard text from server: {}\r\n", text).into_bytes(),
-            ));
+            debug!("[VNC] clipboard text received: {} bytes", text.len());
             return Ok(VncEventEffect::default());
         }
         VncEvent::Bell => {
@@ -1615,5 +1611,57 @@ fn compose_cursor_overlay_for_tick(
         updates.push(overlay);
     } else {
         cursor.last_rect = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::{handle_vnc_event, PointerState, VncCursorState, VncEvent, VncFramebuffer};
+
+    struct ClipboardLogCapture(Mutex<Vec<String>>);
+
+    impl log::Log for ClipboardLogCapture {
+        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+            metadata.target().ends_with("::connection::vnc")
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            if self.enabled(record.metadata()) {
+                self.0.lock().unwrap().push(record.args().to_string());
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    #[tokio::test]
+    async fn clipboard_payload_is_not_forwarded_to_diagnostics() {
+        static LOGGER: ClipboardLogCapture = ClipboardLogCapture(Mutex::new(Vec::new()));
+        log::set_logger(&LOGGER).unwrap();
+        let previous_level = log::max_level();
+        log::set_max_level(log::LevelFilter::Debug);
+
+        let secret = "private-clipboard-value\r\n[forged log]";
+        let effect = handle_vnc_event(
+            &mut VncFramebuffer::default(),
+            &mut VncCursorState::default(),
+            &PointerState::default(),
+            VncEvent::Text(secret.to_string()),
+        )
+        .await
+        .unwrap();
+
+        log::set_max_level(previous_level);
+        assert!(effect.updates.is_empty());
+        assert!(!effect.request_sync_refresh);
+        let messages = LOGGER.0.lock().unwrap();
+        assert!(messages.iter().any(|message| {
+            message == &format!("[VNC] clipboard text received: {} bytes", secret.len())
+        }));
+        assert!(messages.iter().all(|message| {
+            !message.contains(secret) && !message.contains("forged log")
+        }));
     }
 }
