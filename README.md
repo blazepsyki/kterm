@@ -88,4 +88,4 @@ cargo test --locked
 
 kterm 자체는 `MIT OR Apache-2.0`입니다. [MIT](docs/license/LICENSE-MIT) 또는 [Apache-2.0](docs/license/LICENSE-APACHE)을 선택하여 적용할 수 있으며 [안내 원문](docs/license/LICENSE)을 함께 제공합니다.
 
-의존성·MPL-2.0 배포 점검과 폰트 고지는 [구조와 구현 현황의 라이선스 절](docs/architecture.md#의존성과-라이선스)에 통합했습니다. D2Coding의 [OFL 원문](assets/fonts/OFL-1.1.txt)과 [폰트 고지](assets/fonts/D2Coding-LICENSE-NOTICE.txt)는 유지합니다.
+의존성·MPL-2.0 배포 점검과 폰트 고지는 [구조와 구현 현황의 라이선스 절](docs/architecture.md#의존성과-라이선스)에 통합했습니다. 포함된 폰트는 D2Coding 1.4.0 일반 Regular이며 [OFL 원문](assets/fonts/OFL-1.1.txt)과 [출처·폰트 고지](assets/fonts/D2Coding-LICENSE-NOTICE.txt)를 함께 제공합니다.

@@ -205,7 +205,7 @@ MPL 코드를 변경하지 않고 직접 컴파일하여 외부 배포하는 경
 
 - 프로젝트: [MIT](license/LICENSE-MIT), [Apache-2.0](license/LICENSE-APACHE), [안내](license/LICENSE)입니다.
 - MPL 원문: [LICENSE-MPL-2.0](license/LICENSE-MPL-2.0)입니다.
-- D2Coding: [OFL 원문](../assets/fonts/OFL-1.1.txt), [폰트 고지](../assets/fonts/D2Coding-LICENSE-NOTICE.txt)입니다.
+- D2Coding: 2026-10-08에 공식 [1.4.0 릴리즈](https://github.com/naver/d2-coding-font/releases/tag/VER1.4.0)의 일반 Regular 파일로 갱신했습니다. `assets/fonts/D2Coding.ttf`로 포함하며 family는 기존과 같은 `D2Coding`입니다. [OFL 원문](../assets/fonts/OFL-1.1.txt)과 [출처·SHA-256·폰트 고지](../assets/fonts/D2Coding-LICENSE-NOTICE.txt)를 함께 배포합니다.
 - [deny.toml](../deny.toml)은 allowlist·exception을 선언합니다. 고지·source 제공 완료를 의미하지는 않습니다.
 - **업그레이드 검증:** `cargo deny check licenses`가 통과했습니다. allowlist의 OpenSSL이 현재 graph에 없어 license-not-encountered 경고가 있습니다. 최초 문서 통합의 offline 실패와 과거 unescaper 경고는 현재 결과와 구분합니다. 과거 기록은 [원본](archived/2026-10-06/THIRD_PARTY_LICENSES.md)에 보관합니다.
 

@@ -301,6 +301,15 @@ K18은 다른 P1 기능의 완료를 기다리지 않고 P1 초반부터 조사�
 
 기존 FieldFocused·RemoteDisplayInputs dead_code 경고는 남아 있습니다. SSH/RDP trust, terminal 오류·종료 정책 등 기존 P0 문제가 의존성 갱신만으로 해결된 것은 아닙니다. 버전 표·license 구성은 [구조와 구현 현황](architecture.md#의존성과-라이선스)에서 확인하시면 됩니다.
 
+### D2Coding 1.4.0 업데이트
+
+2026-10-08에 포함 폰트를 1.3.2 Build 20180524에서 공식 최신 안정 [1.4.0 Build 20261003](https://github.com/naver/d2-coding-font/releases/tag/VER1.4.0)으로 갱신했습니다. 기존과 같은 일반 Regular 파일을 `assets/fonts/D2Coding.ttf`에 보관합니다. family가 `D2Coding`으로 유지되므로 로딩 코드와 셀 크기는 변경하지 않았습니다.
+
+- GitHub releases/latest API에서 VER1.4.0의 안정 릴리즈 여부를 확인했습니다.
+- 압축 파일 SHA-256이 공식 asset digest와 일치하며 포함한 폰트와 OFL 원문도 압축 파일의 원본 바이트와 일치합니다. 출처·hash는 [폰트 고지](../assets/fonts/D2Coding-LICENSE-NOTICE.txt)에 기록했습니다.
+- TTF의 family·Regular·버전 metadata, ASCII·한글·Powerline·wave dash의 대표 glyph와 Latin/한글 advance 500/1000을 확인했습니다. 실제 GUI의 글자 표시 품질은 별도 검증 대상입니다.
+- `cargo build --release --locked --offline`이 통과했고 생성한 `target/release/kterm.exe`에 새 폰트의 원본 바이트가 포함된 것을 확인했습니다. 기존 dead_code 경고는 남아 있습니다.
+
 ## 검증 계획
 
 ### 최초 분석의 기준선

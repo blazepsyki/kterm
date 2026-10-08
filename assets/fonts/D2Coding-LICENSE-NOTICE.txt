@@ -1,22 +1,25 @@
-D2Coding Font License Notice
+D2Coding 폰트 배포 고지
 
-Font file:
-- D2Coding.ttf
+포함 파일과 버전:
+- 파일: D2Coding.ttf
+- 버전: 1.4.0, Build 20261003
+- 종류: D2Coding Regular 일반 버전
+- 갱신일: 2026-10-08, 한국 시간 기준
+- SHA-256: d5f2b6bf5b1826cfbf3734c70582f0cd42ea2e1d6c2636ae681b612bc9c5682f
 
-Upstream project:
-- https://github.com/naver/d2codingfont
+공식 배포 출처:
+- 프로젝트: https://github.com/naver/d2-coding-font
+- 릴리즈: https://github.com/naver/d2-coding-font/releases/tag/VER1.4.0
+- 압축 파일: D2Coding-Ver1.4.0-20261003.zip
+- 압축 파일 SHA-256: 17e2da5e2879006eb725b87943f7988736ef8b6c9f8b84bc8e3bdbcb8dd46744
+- 원본 경로: D2Coding/D2Coding-Ver1.4.0-20261003.ttf
 
-License:
-- SIL Open Font License, Version 1.1 (OFL-1.1)
-- Official text is included at: OFL-1.1.txt
+라이선스와 저작권:
+- 라이선스: SIL Open Font License, Version 1.1 (OFL-1.1)
+- 저작권자: NAVER Corporation, 2015, https://www.navercorp.com
+- Reserved Font Name: D2Coding, D2Coding-Bold
+- 공식 릴리즈의 OFL.txt 원문을 OFL-1.1.txt에 그대로 포함합니다.
 
-Copyright / Reserved Font Name notice
-(source: https://github.com/naver/d2codingfont/wiki/Open-Font-License):
-- Copyright (c) 2015, NAVER Corporation (http://www.navercorp.com/),
-  with Reserved Font Name D2Coding.
-- Copyright (c) 2015, NAVER Corporation (http://www.navercorp.com/),
-  with Reserved Font Name D2Coding-Bold.
-
-Redistribution note:
-- This repository redistributes D2Coding.ttf with its OFL-1.1 license text.
-- If you modify the font, review OFL Reserved Font Name conditions before renaming/distribution.
+재배포 정보:
+- 원본 폰트 바이트를 수정하지 않고 저장소의 기존 파일명 D2Coding.ttf로 보관합니다.
+- 폰트와 함께 OFL-1.1.txt의 라이선스·저작권 고지를 배포합니다.
